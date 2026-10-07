@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --color-primary-50: #eff6ff;
+  --color-primary-100: #dbeafe;
+  --color-primary-200: #bfdbfe;
+  --color-primary-300: #93c5fd;
+  --color-primary-400: #60a5fa;
+  --color-primary-500: #3b82f6;
+  --color-primary-600: #2563eb;
+  --color-primary-700: #1d4ed8;
+  --color-primary-800: #1e40af;
+  --color-primary-900: #1e3a8a;
+  --color-accent-400: #34d399;
+  --color-accent-500: #10b981;
+  --color-accent-600: #059669;
+  --color-navy-50: #f0f4ff;
+  --color-navy-100: #dbe4ff;
+  --color-navy-200: #bac8ff;
+  --color-navy-300: #91a7ff;
+  --color-navy-400: #748ffc;
+  --color-navy-500: #5c7cfa;
+  --color-navy-600: #4c6ef5;
+  --color-navy-700: #4263eb;
+  --color-navy-800: #3b5bdb;
+  --color-navy-900: #364fc7;
+}
+
+body {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  background-color: #f1f5f9;
+  color: #1e293b;            /* darker default text */
+  font-weight: 500;          /* slightly bolder everywhere for clarity */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Global text clarity ──
+   Muted slate text was too light to read on the light pages. Darken the three
+   light shades by ~one step (unlayered rules beat Tailwind's layered utilities). */
+.text-slate-300 { color: #94a3b8; }   /* was #cbd5e1 → slate-400 */
+.text-slate-400 { color: #64748b; }   /* was #94a3b8 → slate-500 */
+.text-slate-500 { color: #475569; }   /* was #64748b → slate-600 */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f1f5f9; }
+::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* Scrollable but with no visible scrollbar (still scrolls via mouse wheel / drag). */
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.9); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}

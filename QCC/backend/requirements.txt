@@ -1,0 +1,10 @@
+# QCC Monitor — backend dependencies
+# Install:  python -m pip install -r requirements.txt
+fastapi>=0.115
+uvicorn[standard]>=0.30
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+PyJWT>=2.8
+python-dotenv>=1.0
+python-multipart>=0.0.9
+# Password hashing uses the Python standard library (hashlib.pbkdf2_hmac) — no bcrypt/passlib needed.
