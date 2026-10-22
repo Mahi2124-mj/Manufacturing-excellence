@@ -26,6 +26,9 @@ from security import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+LEGACY_USERNAMES = {"admin": "admin@qcc.com"}
+
+
 def _find_login_user(db: Session, identifier: str):
     """Resolve a full email, a username = the part of the email before '@'
     (amit@qcc.com -> "amit", admin@qcc.com -> "admin"), or the user's full name
@@ -36,6 +39,13 @@ def _find_login_user(db: Session, identifier: str):
         return None
     if "@" in ident:
         return db.query(User).filter(func.lower(User.email) == ident).first()
+    # The login screen's old "admin" shortcut always meant admin@qcc.com; keep it
+    # working even when another address also starts with "admin@".
+    legacy = LEGACY_USERNAMES.get(ident)
+    if legacy:
+        user = db.query(User).filter(func.lower(User.email) == legacy).first()
+        if user:
+            return user
     users = db.query(User).all()
     matches = [u for u in users if u.email.lower().split("@")[0] == ident]
     if not matches:
