@@ -2,15 +2,18 @@
 // Company-grade document control for a QCC workflow step: upload with a drag-&-drop
 // dialog + document metadata (category, reference no., description), an audit trail
 // (uploaded-by / date / revision), and a searchable, filterable register table.
-// Files are kept in localStorage per project+step (small files keep a data URL so
-// they can be re-opened; large ones store metadata only).
+// Files are uploaded to the server and the register (metadata) is a shared document,
+// so every PC sees and can open the same files. Entries saved before this keep their
+// small embedded copy (dataUrl) and still open.
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import {
   FileText, Image as ImageIcon, FileSpreadsheet, Presentation, File as FileIcon,
-  Plus, Trash2, FolderOpen, ExternalLink, Search, X, UploadCloud, ListChecks,
+  Plus, Trash2, FolderOpen, ExternalLink, Search, X, UploadCloud, ListChecks, Loader2,
 } from 'lucide-react';
 import { useConfirm } from './ConfirmDialog';
 import { useAuth } from '../lib/auth';
+import { api, ApiError } from '../lib/api';
+import { sharedStore } from '../lib/sharedStore';
 
 type DocKind = 'pdf' | 'image' | 'excel' | 'ppt' | 'word' | 'other';
 
@@ -25,7 +28,8 @@ interface DocItem {
   refNo?: string;
   description?: string;
   version: number;
-  dataUrl?: string;
+  fileId?: string;      // the uploaded file on the server
+  dataUrl?: string;     // older entries: small file embedded in the record
 }
 
 // Document categories a company quality project would file against.
@@ -56,7 +60,7 @@ const CAT_BADGE: Record<string, string> = {
 
 // Accepted upload formats (broad, but still the office set a quality project uses).
 const ACCEPT = '.pdf,image/*,.xls,.xlsx,.csv,.ppt,.pptx,.doc,.docx';
-const MAX_INLINE = 1.5 * 1024 * 1024;   // keep a re-openable data URL only under 1.5 MB
+const MAX_UPLOAD = 25 * 1024 * 1024;    // the server's limit per file
 
 const fmtSize = (b: number) => (b < 1024 ? `${b} B` : b < 1024 * 1024 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`);
 const fmtDate = (s: string) => { const d = new Date(s); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }); };
@@ -77,13 +81,14 @@ function normalise(raw: any): DocItem {
     id: raw.id, name: raw.name, kind: raw.kind || 'other', size: raw.size || 0,
     addedAt: raw.addedAt || new Date().toISOString(), uploadedBy: raw.uploadedBy || '—',
     category: raw.category || 'Other', refNo: raw.refNo, description: raw.description,
-    version: raw.version || 1, dataUrl: raw.dataUrl,
+    version: raw.version || 1, fileId: raw.fileId, dataUrl: raw.dataUrl,
   };
 }
 
+// The register is a shared document (loaded before this step mounts).
 function load(key: string): DocItem[] {
-  try { const raw = localStorage.getItem(key); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p.map(normalise); } } catch { /* ignore */ }
-  return [];
+  const p = sharedStore.get<unknown[]>(key);
+  return Array.isArray(p) ? p.map(normalise) : [];
 }
 
 let _uid = 0;
@@ -103,16 +108,35 @@ export default function StepDocuments({ storageKey, disabled = false, recommende
   const [refNo, setRefNo] = useState('');
   const [description, setDescription] = useState('');
   const [dragActive, setDragActive] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setDocs(load(storageKey)); }, [storageKey]);
 
   const persist = (next: DocItem[]) => {
     setDocs(next);
-    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* quota — state still holds it */ }
+    sharedStore.set(storageKey, next);
   };
 
-  const openUpload = () => { setFile(null); setCategory(CATEGORIES[0]); setRefNo(''); setDescription(''); setDragActive(false); setShowUpload(true); };
+  const openUpload = () => { setFile(null); setCategory(CATEGORIES[0]); setRefNo(''); setDescription(''); setDragActive(false); setUploadError(''); setShowUpload(true); };
+
+  // Open a document: files on the server are fetched with the user's login, then shown
+  // in a new tab (or saved, for types the browser cannot display).
+  const openDoc = async (d: DocItem) => {
+    if (!d.fileId) return;
+    const win = window.open('', '_blank');
+    try {
+      const blob = await api.downloadFile(d.fileId);
+      const url = URL.createObjectURL(blob);
+      if (win) win.location.href = url;
+      else { const a = document.createElement('a'); a.href = url; a.download = d.name; document.body.appendChild(a); a.click(); a.remove(); }
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      if (win) win.close();
+      alert(e instanceof ApiError ? e.message : 'Could not open the document');
+    }
+  };
 
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault(); setDragActive(false);
@@ -120,28 +144,31 @@ export default function StepDocuments({ storageKey, disabled = false, recommende
     if (f) setFile(f);
   };
 
-  const save = () => {
+  const save = async () => {
     if (!file) return;
-    const kind = detectKind(file.name, file.type);
-    const version = docs.filter(d => d.name === file.name && d.category === category).length + 1;
-    const base: DocItem = {
-      id: nid(), name: file.name, kind, size: file.size, addedAt: new Date().toISOString(),
-      uploadedBy: user?.name || 'You', category, refNo: refNo.trim() || undefined,
-      description: description.trim() || undefined, version,
-    };
-    const done = (item: DocItem) => { persist([item, ...docs]); setShowUpload(false); };
-    if (file.size <= MAX_INLINE) {
-      const reader = new FileReader();
-      reader.onload = () => done({ ...base, dataUrl: typeof reader.result === 'string' ? reader.result : undefined });
-      reader.onerror = () => done(base);
-      reader.readAsDataURL(file);
-    } else {
-      done(base);
-    }
+    if (file.size > MAX_UPLOAD) { setUploadError(`Files up to ${fmtSize(MAX_UPLOAD)} can be uploaded.`); return; }
+    setUploading(true); setUploadError('');
+    try {
+      const stored = await api.uploadFile(storageKey, file);
+      const version = docs.filter(d => d.name === file.name && d.category === category).length + 1;
+      const item: DocItem = {
+        id: nid(), name: file.name, kind: detectKind(file.name, file.type), size: file.size, addedAt: new Date().toISOString(),
+        uploadedBy: user?.name || 'You', category, refNo: refNo.trim() || undefined,
+        description: description.trim() || undefined, version, fileId: stored.id,
+      };
+      persist([item, ...docs]);
+      setShowUpload(false);
+    } catch (e) {
+      setUploadError(e instanceof ApiError ? e.message : 'Upload failed');
+    } finally { setUploading(false); }
   };
 
   const removeDoc = async (d: DocItem) => {
     if (await askConfirm({ title: 'Delete this document?', message: `“${d.name}” will be removed from the register.` })) {
+      if (d.fileId) {
+        try { await api.deleteFile(d.fileId); }
+        catch (e) { alert(e instanceof ApiError ? e.message : 'Could not delete the file'); return; }
+      }
       persist(docs.filter(x => x.id !== d.id));
     }
   };
@@ -249,7 +276,10 @@ export default function StepDocuments({ storageKey, disabled = false, recommende
                     <td className="px-3 py-3 text-right text-xs text-slate-500 whitespace-nowrap">{fmtSize(d.size)}</td>
                     <td className="px-3 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        {d.dataUrl && (
+                        {d.fileId && (
+                          <button type="button" onClick={() => openDoc(d)} title="Open / download" className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"><ExternalLink size={15} /></button>
+                        )}
+                        {!d.fileId && d.dataUrl && (
                           <a href={d.dataUrl} target="_blank" rel="noreferrer" download={d.name} title="Open / download" className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"><ExternalLink size={15} /></a>
                         )}
                         <button type="button" onClick={() => removeDoc(d)} disabled={disabled} title="Delete document" className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 transition-colors"><Trash2 size={15} /></button>
@@ -329,11 +359,12 @@ export default function StepDocuments({ storageKey, disabled = false, recommende
               <div className="flex items-center gap-2 text-[11px] text-slate-400">
                 <span>Uploaded by <b className="text-slate-500">{user?.name || 'You'}</b> · {fmtDate(new Date().toISOString())}</span>
               </div>
+              {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
             </div>
 
             <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
               <button onClick={() => setShowUpload(false)} className="px-4 py-2.5 text-sm font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg">Cancel</button>
-              <button onClick={save} disabled={!file} className="px-5 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg shadow-sm">Add to Register</button>
+              <button onClick={save} disabled={!file || uploading} className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg shadow-sm">{uploading && <Loader2 size={14} className="animate-spin" />} {uploading ? 'Uploading…' : 'Add to Register'}</button>
             </div>
           </div>
         </div>

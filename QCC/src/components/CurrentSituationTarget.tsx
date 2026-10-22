@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { sharedStore } from '../lib/sharedStore';
 import { Plus, Trash2, BarChart3, PieChart as PieIcon, X } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, ComposedChart, PieChart, Pie,
@@ -13,8 +14,10 @@ interface Row { id: string; label: string; value: number; }
 type ChartType = 'bar' | 'line' | 'pareto' | 'pie' | 'doughnut';
 type Category = 'Machine' | 'Shift' | 'Defect' | 'Operator' | 'Process' | 'Custom';
 
-let _uid = 500;
-const uid = () => `m${++_uid}`;
+// Ids must stay unique across reloads (they are saved), so they are random, not a counter.
+const uid = () => `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+interface SavedSheet { metrics: Metric[]; chartType: ChartType; category: Category; customName: string; rows: Row[] }
 
 const CHART_TYPES: { key: ChartType; label: string }[] = [
   { key: 'bar', label: 'Bar' },
@@ -32,25 +35,25 @@ const PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4
 const CV = { current: '#ef4444', target: '#3b82f6', cum: '#f97316' };
 
 // ─── Component ───────────────────────────────────────────
-export default function CurrentSituationTarget() {
+export default function CurrentSituationTarget({ projectId }: { projectId: string }) {
+  // Saved per project on the server (shared by every PC); loaded before this step mounts.
+  // A new project starts empty — the team enters its own baseline and target.
+  const storageKey = `step-current-target/${projectId}`;
+  const [saved] = useState(() => sharedStore.get<SavedSheet>(storageKey));
+
   // Chart 1 — Current vs Target metrics
-  const [metrics, setMetrics] = useState<Metric[]>([
-    { id: uid(), name: 'Setup Time', unit: 'min', currentValue: 45, targetValue: 27 },
-    { id: uid(), name: 'Defect Rate', unit: '%', currentValue: 3.2, targetValue: 1.5 },
-    { id: uid(), name: 'Reject Count', unit: 'pcs/day', currentValue: 28, targetValue: 12 },
-  ]);
+  const [metrics, setMetrics] = useState<Metric[]>(() => saved?.metrics ?? []);
 
   // Chart 2 — configurable analysis chart
-  const [chartType, setChartType] = useState<ChartType>('pareto');
-  const [category, setCategory] = useState<Category>('Defect');
-  const [customName, setCustomName] = useState('');
-  const [rows, setRows] = useState<Row[]>([
-    { id: uid(), label: 'Scratches', value: 45 },
-    { id: uid(), label: 'Misalignment', value: 28 },
-    { id: uid(), label: 'Burr', value: 15 },
-    { id: uid(), label: 'Contamination', value: 8 },
-    { id: uid(), label: 'Other', value: 4 },
-  ]);
+  const [chartType, setChartType] = useState<ChartType>(() => saved?.chartType ?? 'pareto');
+  const [category, setCategory] = useState<Category>(() => saved?.category ?? 'Defect');
+  const [customName, setCustomName] = useState(() => saved?.customName ?? '');
+  const [rows, setRows] = useState<Row[]>(() => saved?.rows ?? []);
+
+  useEffect(() => {
+    const t = setTimeout(() => sharedStore.set(storageKey, { metrics, chartType, category, customName, rows }), 500);
+    return () => clearTimeout(t);
+  }, [storageKey, metrics, chartType, category, customName, rows]);
 
   // Data-entry popups
   const [showMetrics, setShowMetrics] = useState(false);
@@ -105,7 +108,7 @@ export default function CurrentSituationTarget() {
 
   // ── Chart 2 renderer ──
   const renderChart2 = () => {
-    if (data2.length === 0) return EMPTY(`Click "Feed data" to add ${catLabel.toLowerCase()} data`);
+    if (data2.length === 0) return EMPTY(`Click "Create Chart" to add ${catLabel.toLowerCase()} data`);
     if (chartType === 'pie' || chartType === 'doughnut') {
       return (
         <ResponsiveContainer width="100%" height={320}>
@@ -182,7 +185,7 @@ export default function CurrentSituationTarget() {
           <button onClick={() => setShowMetrics(true)} className={`ml-auto ${feedBtn}`}><Plus size={14} /> Add Metric</button>
         </div>
         <div className="p-4">
-          {cvtData.length === 0 ? EMPTY('Click "Feed data" to add metrics') : (
+          {cvtData.length === 0 ? EMPTY('Click "Add Metric" to enter current and target values') : (
             <ResponsiveContainer width="100%" height={320}>
               <BarChart data={cvtData} margin={{ top: 20, right: 10, left: 0, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />

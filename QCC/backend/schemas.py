@@ -60,6 +60,25 @@ class TokenResponse(CamelModel):
     user: UserOut
 
 
+# ---------- User management (admin) ----------
+class UserCreate(CamelModel):
+    name: str
+    email: str
+    role: str = "member"
+    department: str
+    password: str
+    joined_at: Optional[str] = None
+
+
+class UserUpdate(CamelModel):
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class AdminPasswordReset(CamelModel):
+    new_password: str
+
+
 # ---------- Teams ----------
 class TeamMemberBase(CamelModel):
     member_id: str
@@ -115,6 +134,28 @@ class TeamUpdate(CamelModel):
     project_title: Optional[str] = None
     status: Optional[str] = None
     current_stage: Optional[int] = None
+    members: Optional[list[TeamMemberBase]] = None   # full replacement of the member list
+    change_reason: Optional[str] = None             # non-admin edits: shown to the approving admin
+
+
+class TeamChangeRequestOut(CamelModel):
+    id: str
+    team_id: str
+    team_name: Optional[str] = None
+    requested_by: Optional[str] = None
+    requested_by_name: Optional[str] = None
+    requested_at: Optional[str] = None
+    status: str = "pending"
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    review_comments: Optional[str] = None
+    change_reason: Optional[str] = None
+    changes: list[dict[str, Any]] = []   # [{field, oldValue, newValue}]
+
+
+class ChangeRequestDecision(CamelModel):
+    status: str  # approved | rejected
+    comments: Optional[str] = None
 
 
 # ---------- Projects / Workflow ----------
@@ -237,6 +278,32 @@ class CycleCreate(CamelModel):
 class CycleUpdate(CamelModel):
     is_active: Optional[bool] = None
     name: Optional[str] = None
+
+
+# ---------- Shared documents & files ----------
+class SharedDocOut(CamelModel):
+    key: str
+    data: Any = None
+    version: int = 0                     # 0 = nothing saved yet
+    updated_at: Optional[str] = None
+    updated_by_name: Optional[str] = None
+    can_edit: bool = False               # may the caller save this key
+
+
+class SharedDocSave(CamelModel):
+    key: str
+    data: Any = None
+    base_version: int = 0                # the version the client loaded (0 if none)
+
+
+class StoredFileOut(CamelModel):
+    id: str
+    scope: str
+    file_name: str
+    content_type: Optional[str] = None
+    size: int = 0
+    uploaded_by_name: Optional[str] = None
+    uploaded_at: Optional[str] = None
 
 
 # ---------- Dashboard ----------

@@ -212,6 +212,42 @@ class AuditLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class SharedDoc(Base):
+    """JSON content the web app used to keep only in each browser's localStorage — QCC
+    step sheets, meeting minutes, team evaluation / assessment and the admin config —
+    stored centrally so every PC sees the same data. `key` is "<kind>/<ref>", e.g.
+    "step-theme/PRJ-001" or "config-hierarchy"; routers/docs.py decides who may read
+    and write each kind."""
+    __tablename__ = "shared_docs"
+
+    key = Column(String, primary_key=True)
+    kind = Column(String, nullable=False, index=True)
+    project_id = Column(String, nullable=True, index=True)
+    team_id = Column(String, nullable=True, index=True)
+    data = Column(JSON, nullable=True)
+    version = Column(Integer, default=1, nullable=False)   # bumped on every save
+    updated_at = Column(String, nullable=True)
+    updated_by = Column(String, nullable=True)
+    updated_by_name = Column(String, nullable=True)
+
+
+class StoredFile(Base):
+    """A document uploaded to a workflow step's document register. The bytes live in
+    backend/uploads; this row holds who uploaded what, for which project."""
+    __tablename__ = "stored_files"
+
+    id = Column(String, primary_key=True)
+    project_id = Column(String, nullable=False, index=True)
+    scope = Column(String, nullable=False)           # e.g. "step-docs/PRJ-001/root-cause"
+    file_name = Column(String, nullable=False)
+    content_type = Column(String, nullable=True)
+    size = Column(Integer, default=0, nullable=False)
+    stored_name = Column(String, nullable=False)     # file name on disk under UPLOAD_DIR
+    uploaded_by = Column(String, nullable=True)
+    uploaded_by_name = Column(String, nullable=True)
+    uploaded_at = Column(String, nullable=True)
+
+
 class PasswordResetCode(Base):
     """A one-time code emailed to a user who forgot their password.
 

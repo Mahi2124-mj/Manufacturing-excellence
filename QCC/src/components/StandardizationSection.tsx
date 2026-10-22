@@ -4,6 +4,8 @@ import {
   CheckCircle2, AlertCircle, Lock, Unlock, ShieldCheck,
 } from 'lucide-react';
 import { useConfirm } from './ConfirmDialog';
+import { useAuth } from '../lib/auth';
+import { sharedStore } from '../lib/sharedStore';
 
 interface FileMeta { name: string; size: number; type: string }
 
@@ -41,10 +43,9 @@ const ALLOWED_EXTENSIONS = ['.xls', '.xlsx', '.csv', '.ppt', '.pptx', '.doc', '.
 // Evidence: PDF / Photo / Checklist
 const EVIDENCE_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.xls', '.xlsx', '.csv', '.doc', '.docx'];
 
-const STORAGE_KEY = 'qcc-standardization-control';
-
+// One blank row to start from (a sample CNC SOP used to be pre-filled here).
 const defaultDocs = (): StandardizationDoc[] => [
-  { id: '1', documentType: 'SOP', documentName: 'Standard Operating Procedure for CNC Setup', docNumber: 'SOP-MFG-001', revNo: 'Rev 1.0', uploadedDocument: null, createdAt: new Date().toISOString() },
+  { id: '1', documentType: '', documentName: '', docNumber: '', revNo: '', uploadedDocument: null, createdAt: new Date().toISOString() },
 ];
 const freshCtrl = (): CtrlRow[] =>
   Array.from({ length: 4 }, (_, i) => ({ id: `ctrl-${i}`, when: '', who: '', frequency: '', what: '', evidence: null }));
@@ -65,22 +66,18 @@ const getFileIcon = (name: string) => {
 const formatFileSize = (bytes: number) =>
   bytes < 1024 ? bytes + ' B' : bytes < 1024 * 1024 ? (bytes / 1024).toFixed(1) + ' KB' : (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 
-export default function StandardizationSection({ userRole = 'member' }: { userRole?: string }) {
+export default function StandardizationSection({ projectId, userRole = 'member' }: { projectId: string; userRole?: string }) {
   const isAdmin = userRole === 'admin';
   const askConfirm = useConfirm();
+  const { user } = useAuth();
 
-  const [standardizationDocs, setStandardizationDocs] = useState<StandardizationDoc[]>(() => {
-    try { const s = localStorage.getItem(STORAGE_KEY); if (s) return JSON.parse(s).docs ?? defaultDocs(); } catch { /* default */ }
-    return defaultDocs();
-  });
-  const [ctrl, setCtrl] = useState<CtrlRow[]>(() => {
-    try { const s = localStorage.getItem(STORAGE_KEY); if (s) return JSON.parse(s).ctrl ?? freshCtrl(); } catch { /* default */ }
-    return freshCtrl();
-  });
-  const [approval, setApproval] = useState<{ at: string; by: string } | null>(() => {
-    try { const s = localStorage.getItem(STORAGE_KEY); if (s) return JSON.parse(s).approval ?? null; } catch { /* none */ }
-    return null;
-  });
+  // Each project has its own standardization sheet, saved on the server (shared by every
+  // PC). It used to be one sheet for ALL projects, so approving one locked them all.
+  const STORAGE_KEY = `step-standardization/${projectId}`;
+  const [saved] = useState(() => sharedStore.get<{ docs?: StandardizationDoc[]; ctrl?: CtrlRow[]; approval?: { at: string; by: string } | null }>(STORAGE_KEY));
+  const [standardizationDocs, setStandardizationDocs] = useState<StandardizationDoc[]>(() => saved?.docs ?? defaultDocs());
+  const [ctrl, setCtrl] = useState<CtrlRow[]>(() => saved?.ctrl ?? freshCtrl());
+  const [approval, setApproval] = useState<{ at: string; by: string } | null>(() => saved?.approval ?? null);
   const locked = !!approval; // once approved, the whole step is read-only
 
   const [uploadErrors, setUploadErrors] = useState<Record<string, string>>({});
@@ -89,9 +86,9 @@ export default function StandardizationSection({ userRole = 'member' }: { userRo
   const evidenceRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
-    const t = setTimeout(() => localStorage.setItem(STORAGE_KEY, JSON.stringify({ docs: standardizationDocs, ctrl, approval })), 500);
+    const t = setTimeout(() => sharedStore.set(STORAGE_KEY, { docs: standardizationDocs, ctrl, approval }), 500);
     return () => clearTimeout(t);
-  }, [standardizationDocs, ctrl, approval]);
+  }, [STORAGE_KEY, standardizationDocs, ctrl, approval]);
 
   // ── Standardization documents ──
   const addDocumentRow = () => setStandardizationDocs(d => [...d, { id: Date.now().toString(), documentType: '', documentName: '', docNumber: '', revNo: '', uploadedDocument: null, createdAt: new Date().toISOString() }]);
@@ -124,7 +121,7 @@ export default function StandardizationSection({ userRole = 'member' }: { userRo
     setTimeout(() => setUploadSuccess(s => { const n = { ...s }; delete n[id]; return n; }), 3000);
   };
 
-  const approve = () => setApproval({ at: new Date().toISOString(), by: 'Admin' });
+  const approve = () => setApproval({ at: new Date().toISOString(), by: user?.name || 'Admin' });
   const unlock = () => setApproval(null);
 
   const cell = `w-full px-2 py-1.5 border border-slate-200 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed`;

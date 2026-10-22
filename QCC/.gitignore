@@ -35,3 +35,6 @@ backend/uploads/
 venv/
 __pycache__/
 *.pyc
+
+# Database backups (pg_dump) — contain user data
+db_backups/

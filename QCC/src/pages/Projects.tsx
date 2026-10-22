@@ -39,10 +39,11 @@ const statusBadge = (status: string) =>
       : status === 'on_hold' ? 'bg-amber-100 text-amber-700'
         : 'bg-slate-100 text-slate-600';
 
+// impactScore is stored out of 100 (Reports shows it as "/100").
 const priorityBadge = (score: number) =>
-  score >= 8 ? { label: 'Critical', cls: 'bg-red-50 text-red-700 border-red-200' }
-    : score >= 6 ? { label: 'High', cls: 'bg-orange-50 text-orange-700 border-orange-200' }
-      : score >= 4 ? { label: 'Medium', cls: 'bg-amber-50 text-amber-700 border-amber-200' }
+  score >= 80 ? { label: 'Critical', cls: 'bg-red-50 text-red-700 border-red-200' }
+    : score >= 60 ? { label: 'High', cls: 'bg-orange-50 text-orange-700 border-orange-200' }
+      : score >= 40 ? { label: 'Medium', cls: 'bg-amber-50 text-amber-700 border-amber-200' }
         : { label: 'Low', cls: 'bg-slate-100 text-slate-600 border-slate-200' };
 
 const healthBadge = (p: QCCProject, progress: number) => {

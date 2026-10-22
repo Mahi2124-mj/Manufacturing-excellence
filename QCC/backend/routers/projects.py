@@ -1,15 +1,66 @@
 """Projects and their 7-step QCC workflow."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, accessible_team_ids, can_access_project, can_edit_project
-from models import Project, WorkflowStep, User, AuditLog, Approval
+from models import Project, WorkflowStep, User, AuditLog, Approval, Team, Cycle
 from schemas import ProjectOut, WorkflowStepOut, WorkflowStepUpdate
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+WORKFLOW_STEP_TITLES = [
+    "Theme Selection",
+    "Grasp the Current Situation and Set a Target",
+    "Create an Activity Plan",
+    "Root Cause Analysis",
+    "Countermeasure Study and Implementation",
+    "Check the Results",
+    "Standardization & Establish Control",
+]
+
+
+def create_project_for_team(db: Session, team: Team) -> Project:
+    """Every registered team runs one QCC project. Without it the team never reaches
+    Workflow, Projects, Approvals or Reports, so it is created with the team. The
+    project starts on the team's registration date so both land in the same period."""
+    n = db.query(Project).count() + 1
+    pid = f"PRJ-{n:03d}"
+    while db.get(Project, pid):
+        n += 1
+        pid = f"PRJ-{n:03d}"
+    started = team.created_at or date.today().isoformat()
+    cycle = db.query(Cycle).filter(Cycle.year == int(started[:4])).first() if started[:4].isdigit() else None
+    title = (team.project_title or team.project_theme or "").strip() or f"{team.name} — QCC Project"
+    now = datetime.now(timezone.utc).isoformat()
+    project = Project(
+        id=pid, team_id=team.id, title=title, problem_statement="", department=team.department,
+        started_at=started, target_completion=(cycle.end_date or None) if cycle else None,
+        status="in_progress", savings=0, impact_score=0,
+    )
+    for i, step_title in enumerate(WORKFLOW_STEP_TITLES, start=1):
+        project.steps.append(WorkflowStep(
+            step_number=i, title=step_title, description=f"Complete all requirements for {step_title.lower()}",
+            status="draft", notes="", attachments=[], updated_at=now,
+        ))
+    db.add(project)
+    return project
+
+
+def ensure_team_projects(db: Session) -> int:
+    """Give every active team that has no project one (teams registered before projects
+    were created automatically). Idempotent; returns how many were created."""
+    with_project = {tid for (tid,) in db.query(Project.team_id).distinct().all()}
+    created = 0
+    for team in db.query(Team).filter(Team.status == "active").order_by(Team.id).all():
+        if team.id not in with_project:
+            create_project_for_team(db, team)
+            db.flush()
+            created += 1
+    db.commit()
+    return created
 
 
 @router.get("", response_model=list[ProjectOut])

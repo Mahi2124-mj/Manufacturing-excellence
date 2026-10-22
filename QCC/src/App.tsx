@@ -33,6 +33,14 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// The Admin Panel is hidden from other roles in the sidebar, but the URL itself must
+// be guarded too (the backend still rejects their admin-only API calls).
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (user?.role !== 'admin') return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
   if (isAuthenticated) return <Navigate to="/" replace />;
@@ -56,7 +64,7 @@ function AppRoutes() {
         <Route path="scheduling" element={<Scheduling />} />
         <Route path="approvals" element={<Approvals />} />
         <Route path="reports" element={<Reports />} />
-        <Route path="admin" element={<AdminPanel />} />
+        <Route path="admin" element={<AdminRoute><AdminPanel /></AdminRoute>} />
         <Route path="settings" element={<Settings />} />
         <Route path="evaluation-score" element={<EvaluationScore />} />
         <Route path="circle-assessment" element={<CircleAssessment />} />

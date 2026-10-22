@@ -3,7 +3,9 @@ import {
   ShieldCheck, Lock, Unlock, CheckCircle2, Download, Flag,
   CornerUpLeft, AlertTriangle, ClipboardList,
 } from 'lucide-react';
-import { openFinalReport, buildFinalReportHTML } from '../lib/finalReport';
+import { buildFinalReportHTML, reportKeys } from '../lib/finalReport';
+import { useAuth } from '../lib/auth';
+import { sharedStore } from '../lib/sharedStore';
 import type { QCCProject, Team } from '../types';
 import type { WorkflowStepView } from '../lib/activitySteps';
 
@@ -23,7 +25,8 @@ export interface ClosureState {
   approval: ClosureApproval | null;
 }
 
-export const CLOSURE_KEY = (projectId: string) => `qcc-final-closure-${projectId}`;
+// Saved per project on the server (shared by every PC).
+export const CLOSURE_KEY = (projectId: string) => `step-closure/${projectId}`;
 
 const STATUS_OPTIONS = [
   'Completed – Targets Achieved',
@@ -41,12 +44,11 @@ const emptyClosure = (): ClosureState => ({
   approval: null,
 });
 
-export function loadClosure(projectId: string): ClosureState {
-  try {
-    const s = localStorage.getItem(CLOSURE_KEY(projectId));
-    if (s) return { ...emptyClosure(), ...JSON.parse(s) };
-  } catch { /* fall through to default */ }
-  return emptyClosure();
+/** A project's closure as loaded into the shared store (load CLOSURE_KEY first), or a
+ *  closure saved anywhere else (e.g. a document fetched by kind). */
+export function loadClosure(projectId: string, raw?: unknown): ClosureState {
+  const s = raw ?? sharedStore.get(CLOSURE_KEY(projectId));
+  return s && typeof s === 'object' ? { ...emptyClosure(), ...(s as Partial<ClosureState>) } : emptyClosure();
 }
 
 interface Props {
@@ -67,6 +69,8 @@ export default function FinalProjectClosure({
   steps, project, team, periodLabel, onSendBack, onClosureChange,
 }: Props) {
   const isAdvisor = userRole === 'admin' || userRole === 'facilitator';
+  const { user } = useAuth();
+  const advisorName = user?.name || 'Advisor';
 
   const [state, setState] = useState<ClosureState>(() => loadClosure(projectId));
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -80,14 +84,14 @@ export default function FinalProjectClosure({
 
   const persist = (next: ClosureState) => {
     setState(next);
-    localStorage.setItem(CLOSURE_KEY(projectId), JSON.stringify(next));
+    sharedStore.set(CLOSURE_KEY(projectId), next);
     onClosureChange?.(next);
   };
   const patch = (p: Partial<ClosureState>) => persist({ ...state, ...p });
 
   const approve = () => {
     if (!isAdvisor) return;
-    persist({ ...state, approval: { decision: 'approved', by: 'Advisor', role: userRole, at: new Date().toISOString() } });
+    persist({ ...state, approval: { decision: 'approved', by: advisorName, role: userRole, at: new Date().toISOString() } });
   };
   const unlock = () => {
     if (!isAdvisor) return;
@@ -96,7 +100,7 @@ export default function FinalProjectClosure({
   const sendBack = () => {
     if (!isAdvisor || !rejectRemarks.trim()) return;
     const remarks = rejectRemarks.trim();
-    persist({ ...state, approval: { decision: 'rejected', by: 'Advisor', role: userRole, at: new Date().toISOString(), remarks, sentBackToStep: rejectStep } });
+    persist({ ...state, approval: { decision: 'rejected', by: advisorName, role: userRole, at: new Date().toISOString(), remarks, sentBackToStep: rejectStep } });
     setRejectOpen(false);
     setRejectRemarks('');
     onSendBack(rejectStep, remarks); // auto-route the workflow back to the chosen step
@@ -106,12 +110,18 @@ export default function FinalProjectClosure({
   const priorSteps = steps.slice(0, Math.max(0, steps.length - 1));
 
   // Generate the full, print-ready A4 Final Report (opens in a new tab → Save as PDF).
-  const downloadReport = () => {
+  const downloadReport = async () => {
     if (!project) { alert('Report data is still loading — please try again in a moment.'); return; }
+    // Open the tab right away (still inside the click, so it is not treated as a pop-up),
+    // then fetch every step's latest saved data from the server and write the report.
+    const win = window.open('', '_blank');
+    try { await sharedStore.load(reportKeys(project.id, team?.id), { force: true }); }
+    catch { if (win) win.close(); alert('Could not load the report data from the server. Please try again.'); return; }
     const ctx = { project, team: team ?? null, workflowSteps: steps, closure: state, periodLabel, generatedAt: new Date().toLocaleString() };
-    if (openFinalReport(ctx)) return;
+    const html = buildFinalReportHTML(ctx);
+    if (win) { win.document.open(); win.document.write(html); win.document.close(); return; }
     // Pop-up blocked → download the same report as a self-contained HTML file instead.
-    const blob = new Blob([buildFinalReportHTML(ctx)], { type: 'text/html;charset=utf-8' });
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;

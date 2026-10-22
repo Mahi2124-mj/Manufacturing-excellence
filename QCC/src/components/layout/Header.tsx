@@ -1,10 +1,25 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation, useNavigationType } from 'react-router-dom';
 import { Bell, Menu, ArrowLeft, CalendarRange } from 'lucide-react';
 import { useAuth } from '../../lib/auth';
 import { useHalfYear, type HalfKey } from '../../lib/halfYear';
-import { mockNotifications } from '../../lib/data';
-import { formatDateTime } from '../../lib/format';
+import { useActivitySteps } from '../../lib/activitySteps';
+import { api } from '../../lib/api';
+import { formatDate, formatDateTime } from '../../lib/format';
+
+interface Notif {
+  id: string;
+  title: string;
+  message: string;
+  type: 'info' | 'warning' | 'success' | 'error';
+  createdAt: string;
+  to: string;
+  adminTab?: string;   // opens this Admin Panel tab
+  read?: boolean;
+}
+
+const APPROVER_ROLES = ['admin', 'dept_head', 'facilitator'];
+const RECENT_DAYS = 30;  // decisions older than this are not shown
 
 interface HeaderProps {
   onMenuClick: () => void;
@@ -46,27 +61,81 @@ export default function Header({ onMenuClick }: HeaderProps) {
     if (depth.current > 0) navigate(-1);
     else navigate('/');
   };
+  const { workflowSteps } = useActivitySteps();
   const [showNotifications, setShowNotifications] = useState(false);
-  const [notifs, setNotifs] = useState(mockNotifications);
+  const [notifs, setNotifs] = useState<Notif[]>([]);
   const notifRef = useRef<HTMLDivElement>(null);
 
   const unreadCount = notifs.filter(n => !n.read).length;
   const pageTitle = PAGE_TITLES[location.pathname];
 
-  // Route a notification to the page where its underlying record lives.
-  const notifTarget = (n: typeof notifs[number]): string => {
-    const s = `${n.title} ${n.message}`.toLowerCase();
-    if (s.includes('approval') || s.includes('approved')) return '/approvals';
-    if (s.includes('overdue') || s.includes('action')) return '/actions';
-    if (s.includes('meeting')) return '/meetings';
-    if (s.includes('step') || s.includes('completed') || s.includes('project')) return '/workflow';
-    return '/';
-  };
+  // Notifications are built from the live records this user can see: approval requests
+  // (pending for approvers, decisions for everyone), overdue actions, and team change
+  // requests. "Read" is remembered per user in this browser.
+  const readKey = user ? `qcc-notif-read-${user.id}` : '';
+  const loadNotifications = useCallback(async () => {
+    if (!user) return;
+    const [approvals, actions, projects, teams, changeRequests] = await Promise.all([
+      api.listApprovals().catch(() => []), api.listActions().catch(() => []),
+      api.listProjects().catch(() => []), api.listTeams().catch(() => []),
+      api.listChangeRequests().catch(() => []),
+    ]);
+    const teamOf = (projectId: string) => {
+      const p = projects.find(x => x.id === projectId);
+      return teams.find(t => t.id === p?.teamId)?.name || p?.title || projectId;
+    };
+    const stepName = (n: number) => `Step ${n}${workflowSteps[n - 1] ? ` (${workflowSteps[n - 1].title})` : ''}`;
+    const since = new Date(Date.now() - RECENT_DAYS * 86400000).toISOString();
+    const list: Notif[] = [];
+    if (APPROVER_ROLES.includes(user.role)) {
+      approvals.filter(a => a.status === 'pending').forEach(a => list.push({
+        id: `apr-p-${a.id}`, title: 'New Approval Request', type: 'warning', to: '/approvals', createdAt: a.requestedAt || '',
+        message: `${teamOf(a.projectId)} submitted ${stepName(a.stepNumber)} for review.`,
+      }));
+    }
+    approvals.filter(a => a.status !== 'pending' && (a.reviewedAt || '') >= since).forEach(a => list.push({
+      id: `apr-d-${a.id}`, to: '/workflow', createdAt: a.reviewedAt || '',
+      title: a.status === 'approved' ? 'Step Approved' : a.status === 'rework' ? 'Rework Requested' : 'Step Rejected',
+      type: a.status === 'approved' ? 'success' : 'error',
+      message: `${stepName(a.stepNumber)} of ${teamOf(a.projectId)} was ${a.status === 'rework' ? 'sent back for rework' : a.status}.${a.comments ? ` "${a.comments}"` : ''}`,
+    }));
+    actions.filter(a => a.status === 'overdue').forEach(a => list.push({
+      id: `act-${a.id}`, title: 'Action Overdue', type: 'error', to: '/actions', createdAt: a.dueDate || '',
+      message: `${a.title} (${teamOf(a.projectId)}) was due ${formatDate(a.dueDate)}.`,
+    }));
+    if (user.role === 'admin') {
+      changeRequests.filter(c => c.status === 'pending').forEach(c => list.push({
+        id: `cr-p-${c.id}`, title: 'Team Change Request', type: 'warning', to: '/admin', adminTab: 'changeRequests', createdAt: c.requestedAt || '',
+        message: `${c.requestedByName || 'A user'} wants to change ${c.teamName || c.teamId}.`,
+      }));
+    } else {
+      changeRequests.filter(c => c.status !== 'pending' && (c.reviewedAt || '') >= since).forEach(c => list.push({
+        id: `cr-d-${c.id}`, to: '/team-registration', createdAt: c.reviewedAt || '',
+        title: c.status === 'approved' ? 'Team Change Approved' : 'Team Change Rejected',
+        type: c.status === 'approved' ? 'success' : 'error',
+        message: `Your change to ${c.teamName || c.teamId} was ${c.status}.${c.reviewComments ? ` "${c.reviewComments}"` : ''}`,
+      }));
+    }
+    let read: string[] = [];
+    try { read = JSON.parse(localStorage.getItem(readKey) || '[]'); } catch { /* none read */ }
+    setNotifs(list
+      .map(n => ({ ...n, read: read.includes(n.id) }))
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+      .slice(0, 30));
+  }, [user, workflowSteps, readKey]);
 
-  const handleNotifClick = (n: typeof notifs[number]) => {
+  // Refresh when the dashboard (where the bell lives) is opened.
+  useEffect(() => { if (location.pathname === '/') loadNotifications(); }, [location.pathname, loadNotifications]);
+
+  const handleNotifClick = (n: Notif) => {
     setNotifs(prev => prev.map(x => (x.id === n.id ? { ...x, read: true } : x)));
+    try {
+      const read: string[] = JSON.parse(localStorage.getItem(readKey) || '[]');
+      if (!read.includes(n.id)) localStorage.setItem(readKey, JSON.stringify([...read, n.id].slice(-500)));
+      if (n.adminTab) localStorage.setItem('qcc-admin-tab', n.adminTab);
+    } catch { /* ignore */ }
     setShowNotifications(false);
-    navigate(notifTarget(n));
+    navigate(n.to);
   };
 
   useEffect(() => {
@@ -151,6 +220,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">{unreadCount} new</span>
                 </div>
                 <div className="max-h-72 overflow-y-auto">
+                  {notifs.length === 0 && <p className="px-4 py-6 text-center text-xs text-slate-400">No notifications</p>}
                   {notifs.map(n => (
                     <button
                       key={n.id}
@@ -167,7 +237,8 @@ export default function Header({ onMenuClick }: HeaderProps) {
                         <div>
                           <p className="text-xs font-semibold text-slate-800">{n.title}</p>
                           <p className="text-[11px] text-slate-500 mt-0.5">{n.message}</p>
-                          <p className="text-[10px] text-slate-400 mt-1">{formatDateTime(n.createdAt)}</p>
+                          {/* Due dates carry no time of day — show the date alone for those. */}
+                          <p className="text-[10px] text-slate-400 mt-1">{n.createdAt.length <= 10 ? formatDate(n.createdAt) : formatDateTime(n.createdAt)}</p>
                         </div>
                       </div>
                     </button>

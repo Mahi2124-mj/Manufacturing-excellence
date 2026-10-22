@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   CalendarDays, Clock3, FileText, CheckCircle2, MapPin,
   Eye, ClipboardCheck, Gauge, Search, X, AlertCircle, Loader2, Calendar as CalendarIcon,
@@ -10,12 +10,14 @@ import { useAuth } from '../lib/auth';
 import { useMeetingSchedules, computeScheduleDate } from '../lib/meetingSchedules';
 import { useActivitySteps } from '../lib/activitySteps';
 import { useHierarchy } from '../lib/hierarchy';
-import { loadClosure } from '../components/FinalProjectClosure';
+import { loadClosure, CLOSURE_KEY } from '../components/FinalProjectClosure';
+import { sharedStore } from '../lib/sharedStore';
 import type { Team, QCCProject } from '../types';
 
 type MeetingStatus = 'today' | 'upcoming' | 'pending_mom' | 'completed';
 
 interface MeetingExec {
+  teamId?: string;                   // whose meeting it is (the server checks who may write it)
   attendanceMarked?: boolean;
   attendancePresent?: string[];      // memberIds present
   momSubmitted?: boolean;
@@ -52,7 +54,10 @@ interface MeetingRow {
   totalMembers: number;
 }
 
-const STORAGE_KEY = 'qcc-meeting-execution';
+// Attendance / MOM / progress of every meeting, saved on the server (shared by every PC)
+// as one map keyed by meeting id. Older versions kept it in this browser only.
+const EXEC_KEY = 'meetings-exec';
+const LEGACY_EXEC_KEY = 'qcc-meeting-execution';
 
 const STATUS_META: Record<MeetingStatus, { label: string; cls: string; dot: string }> = {
   today: { label: 'Today', cls: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500' },
@@ -122,9 +127,9 @@ const shortPeriodLabel = (start: Date, gran: Granularity) =>
 
 const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
 
-function loadExec(): Record<string, MeetingExec> {
-  try { const raw = localStorage.getItem(STORAGE_KEY); if (raw) return JSON.parse(raw); } catch { /* ignore */ }
-  return {};
+function loadLegacyExec(): Record<string, MeetingExec> | null {
+  try { const raw = localStorage.getItem(LEGACY_EXEC_KEY); if (raw) { const p = JSON.parse(raw); if (p && typeof p === 'object') return p; } } catch { /* ignore */ }
+  return null;
 }
 
 export default function MeetingManagement() {
@@ -136,7 +141,9 @@ export default function MeetingManagement() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [projects, setProjects] = useState<QCCProject[]>([]);
   const [loading, setLoading] = useState(true);
-  const [exec, setExec] = useState<Record<string, MeetingExec>>(loadExec);
+  const [exec, setExec] = useState<Record<string, MeetingExec>>({});
+  const [closureDocs, setClosureDocs] = useState<Record<string, unknown>>({});
+  const [execLoaded, setExecLoaded] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<'all' | MeetingStatus>('all');
   const [search, setSearch] = useState('');
@@ -159,6 +166,8 @@ export default function MeetingManagement() {
   const [momDraft, setMomDraft] = useState({ agenda: '', discussion: '', decisions: '', nextDate: '' });
   const [progressDraft, setProgressDraft] = useState(0);
   const [momError, setMomError] = useState('');                        // inline required-field message
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [successPopup, setSuccessPopup] = useState<string | null>(null); // "submitted successfully" popup
 
   const role = user?.role ?? 'member';
@@ -171,8 +180,20 @@ export default function MeetingManagement() {
   // ── Auto-sync teams from Team Registration ──
   // Runs on mount, on window focus and every 15s, so the page stays current without a
   // manual Refresh button.
+  // Meeting records and Step 9 closures come from the server too, so a MOM submitted on
+  // one PC shows on every other PC at the next sync.
   const sync = useCallback(async () => {
-    try { const [t, p] = await Promise.all([api.listTeams(), api.listProjects()]); setTeams(t); setProjects(p); }
+    try {
+      const [t, p] = await Promise.all([api.listTeams(), api.listProjects()]);
+      setTeams(t); setProjects(p);
+      const [, closures] = await Promise.all([
+        sharedStore.load([EXEC_KEY], { force: true }),
+        sharedStore.loadKind('step-closure', p.map(x => CLOSURE_KEY(x.id))),
+      ]);
+      setExec(sharedStore.get<Record<string, MeetingExec>>(EXEC_KEY) || {});
+      setClosureDocs(closures);
+      setExecLoaded(true);
+    }
     catch { /* keep last snapshot */ }
     finally { setLoading(false); }
   }, []);
@@ -186,13 +207,51 @@ export default function MeetingManagement() {
 
   useEffect(() => { if (successPopup) { const t = setTimeout(() => setSuccessPopup(null), 2200); return () => clearTimeout(t); } }, [successPopup]);
 
-  const persistExec = (id: string, patch: MeetingExec) => {
-    setExec(prev => {
-      const next = { ...prev, [id]: { ...prev[id], ...patch } };
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* ignore */ }
-      return next;
-    });
+  useEffect(() => { setSaveError(''); }, [modal]);   // a new dialog starts without the last error
+
+  // Save one meeting's record on top of the latest server copy (other teams' meetings,
+  // saved meanwhile on other PCs, are kept). Closes the dialog only once it is saved.
+  const persistExec = async (m: MeetingRow, patch: MeetingExec, done: string) => {
+    setSaving(true); setSaveError('');
+    try {
+      await sharedStore.update<Record<string, MeetingExec>>(EXEC_KEY, cur => ({
+        ...(cur || {}), [m.id]: { ...(cur?.[m.id] || {}), ...patch, teamId: m.team.id },
+      }));
+      setExec(sharedStore.get<Record<string, MeetingExec>>(EXEC_KEY) || {});
+      setModal(null); setSuccessPopup(done);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Could not save. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   };
+
+  // One-time move: meeting records this browser kept before they were saved on the
+  // server. Uploaded only while the server has none yet, and only the meetings of teams
+  // this user may record for (the server would refuse the rest).
+  const migratedRef = useRef(false);
+  useEffect(() => {
+    if (migratedRef.current || !execLoaded || !teams.length || !user) return;
+    migratedRef.current = true;
+    if (sharedStore.get(EXEC_KEY) != null || !sharedStore.canEdit(EXEC_KEY)) return;
+    const legacy = loadLegacyExec();
+    if (!legacy) return;
+    const teamOf = new Map<string, Team>();
+    teams.forEach(t => teamOf.set(`MTG-${t.id}`, t));
+    schedules.forEach(sc => { const t = teams.find(x => x.id === sc.teamId); if (t) teamOf.set(`MTG-${sc.id}`, t); });
+    const mayRecord = (t: Team) => user.role === 'admin'
+      || (user.role === 'dept_head' ? t.department === user.department
+        : [t.leaderName, t.facilitatorName, t.coordinatorName].includes(user.name));
+    const moved: Record<string, MeetingExec> = {};
+    Object.entries(legacy).forEach(([id, ex]) => {
+      const t = teamOf.get(id);
+      if (t && ex && typeof ex === 'object' && mayRecord(t)) moved[id] = { ...ex, teamId: t.id };
+    });
+    if (!Object.keys(moved).length) return;
+    sharedStore.update<Record<string, MeetingExec>>(EXEC_KEY, cur => ({ ...moved, ...(cur || {}) }))
+      .then(() => setExec(sharedStore.get<Record<string, MeetingExec>>(EXEC_KEY) || {}))
+      .catch(() => { migratedRef.current = false; });
+  }, [execLoaded, teams, schedules, user]);
 
   // ── Build meeting instances: published Admin schedules first, then a default
   //    per team that has none — so the dashboard is always populated and every
@@ -202,7 +261,7 @@ export default function MeetingManagement() {
     // Teams whose project was closed & approved via Step 9 (Final Project Closure) —
     // their meetings are shown as Completed automatically.
     const closedTeamIds = new Set(
-      projects.filter(p => loadClosure(p.id).approval?.decision === 'approved').map(p => p.teamId),
+      projects.filter(p => loadClosure(p.id, closureDocs[CLOSURE_KEY(p.id)] ?? null).approval?.decision === 'approved').map(p => p.teamId),
     );
     const approvedOf = (p: QCCProject) => p.steps.filter(s => s.status === 'approved').length;
     const actualStepOf = (teamId: string): string => {
@@ -275,7 +334,7 @@ export default function MeetingManagement() {
     });
 
     return rows;
-  }, [teams, exec, schedules, projects, workflowSteps]);
+  }, [teams, exec, schedules, projects, workflowSteps, closureDocs]);
 
   // ── Role scoping ──
   const visibleMeetings = useMemo(() => {
@@ -396,20 +455,17 @@ export default function MeetingManagement() {
   const openProgress = (m: MeetingRow) => { setProgressDraft(m.progress); setModal({ type: 'progress', id: m.id }); };
 
   const saveAttendance = () => {
-    if (!activeMeeting) return;
-    persistExec(activeMeeting.id, { attendanceMarked: true, attendancePresent: attendanceDraft });
-    setModal(null); setSuccessPopup('Attendance saved successfully');
+    if (!activeMeeting || saving) return;
+    void persistExec(activeMeeting, { attendanceMarked: true, attendancePresent: attendanceDraft }, 'Attendance saved successfully');
   };
   const saveMom = () => {
-    if (!activeMeeting) return;
+    if (!activeMeeting || saving) return;
     if (!momDraft.agenda.trim()) { setMomError('Agenda is required.'); return; }  // inline, inside the modal
-    persistExec(activeMeeting.id, { momSubmitted: true, mom: momDraft, progress: 100 });
-    setModal(null); setSuccessPopup('MOM submitted successfully');
+    void persistExec(activeMeeting, { momSubmitted: true, mom: momDraft, progress: 100 }, 'MOM submitted successfully');
   };
   const saveProgress = () => {
-    if (!activeMeeting) return;
-    persistExec(activeMeeting.id, { progress: progressDraft });
-    setModal(null); setSuccessPopup('Progress updated successfully');
+    if (!activeMeeting || saving) return;
+    void persistExec(activeMeeting, { progress: progressDraft }, 'Progress updated successfully');
   };
 
   const KPI_CARDS = [
@@ -896,10 +952,11 @@ export default function MeetingManagement() {
             </div>
 
             <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-2">
+              {saveError && <p className="mr-auto flex items-center gap-1.5 text-xs font-medium text-red-600"><AlertCircle size={13} /> {saveError}</p>}
               <button onClick={() => setModal(null)} className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-100">Close</button>
-              {modal.type === 'attendance' && <button onClick={saveAttendance} className="px-4 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg">Save Attendance</button>}
-              {modal.type === 'mom' && <button onClick={saveMom} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg">Submit MOM</button>}
-              {modal.type === 'progress' && <button onClick={saveProgress} className="px-4 py-2 text-sm font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg">Save Progress</button>}
+              {modal.type === 'attendance' && <button onClick={saveAttendance} disabled={saving} className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 rounded-lg">{saving && <Loader2 size={14} className="animate-spin" />}Save Attendance</button>}
+              {modal.type === 'mom' && <button onClick={saveMom} disabled={saving} className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg">{saving && <Loader2 size={14} className="animate-spin" />}Submit MOM</button>}
+              {modal.type === 'progress' && <button onClick={saveProgress} disabled={saving} className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-60 rounded-lg">{saving && <Loader2 size={14} className="animate-spin" />}Save Progress</button>}
             </div>
           </div>
         </div>

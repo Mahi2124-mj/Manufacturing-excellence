@@ -5,14 +5,18 @@
 // surfaces backend error messages via ApiError.
 import type {
   User, Team, QCCProject, QCCStep, ActionItem, ApprovalRequest,
-  Department, SubDepartment, QCCCycleConfig, DashboardStats, MeetingMinute,
+  Department, SubDepartment, QCCCycleConfig, DashboardStats, MeetingMinute, TeamChangeRequest,
 } from '../types';
 
-// Default to 127.0.0.1 (not "localhost") so the browser hits the IPv4 address the
-// backend binds to — avoids IPv6 (::1) resolution flakiness on Windows. Override
-// with VITE_API_URL in a .env file for other hosts.
+// The backend runs on port 8000 of the same machine that serves this page, so build its
+// address from the page's own host: a PC on the network that opened
+// http://192.168.x.x:6001 talks to http://192.168.x.x:8000. On the server itself
+// "localhost" becomes 127.0.0.1 — the IPv4 address the backend binds — to avoid IPv6
+// (::1) resolution flakiness on Windows. VITE_API_URL in a .env file overrides this.
+const pageHost = typeof window !== 'undefined' ? window.location.hostname : '';
 export const API_BASE: string =
-  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') || 'http://127.0.0.1:8000';
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '')
+  || `http://${!pageHost || pageHost === 'localhost' ? '127.0.0.1' : pageHost}:8000`;
 
 const TOKEN_KEY = 'qcc_token';
 const USER_KEY = 'qcc_user';
@@ -58,11 +62,13 @@ export class ApiError extends Error {
 interface RequestOptions {
   method?: string;
   body?: unknown;
+  form?: FormData;   // multipart upload (sent as-is, no JSON content type)
+  blob?: boolean;    // return the response body as a Blob (file download)
   auth?: boolean; // attach Bearer token (default true)
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = true } = opts;
+  const { method = 'GET', body, form, blob, auth = true } = opts;
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (auth) {
@@ -75,7 +81,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     res = await fetch(`${API_BASE}${path}`, {
       method,
       headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: form ?? (body !== undefined ? JSON.stringify(body) : undefined),
     });
   } catch {
     throw new ApiError(0, `Cannot reach the API at ${API_BASE}. Is the backend running?`);
@@ -103,7 +109,30 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (res.status === 204) return undefined as T;
+  if (blob) return (await res.blob()) as T;
   return (await res.json()) as T;
+}
+
+// ---------- shared documents ----------
+// Content that used to live only in one browser's localStorage (step sheets, meeting
+// minutes, evaluation, assessment, admin config), now stored on the server.
+export interface SharedDoc<T = unknown> {
+  key: string;
+  data: T | null;
+  version: number;         // 0 = nothing saved yet
+  updatedAt?: string;
+  updatedByName?: string;
+  canEdit: boolean;
+}
+
+export interface StoredFileMeta {
+  id: string;
+  scope: string;
+  fileName: string;
+  contentType?: string;
+  size: number;
+  uploadedByName?: string;
+  uploadedAt?: string;
 }
 
 // ---------- auth ----------
@@ -143,18 +172,27 @@ export const api = {
 
   // users
   listUsers: () => request<User[]>('/api/users'),
-  createUser: (body: { name: string; email: string; role: string; department: string; password?: string }) =>
+  // admin only: create a login, change role / activation, reset someone's password
+  createUser: (body: { name: string; email: string; role: string; department: string; password: string }) =>
     request<User>('/api/users', { method: 'POST', body }),
+  updateUser: (id: string, body: { role?: string; isActive?: boolean }) =>
+    request<User>(`/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
+  resetUserPassword: (id: string, newPassword: string) =>
+    request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/password`, { method: 'POST', body: { newPassword } }),
 
   // teams
   listTeams: () => request<Team[]>('/api/teams'),
   getTeam: (id: string) => request<Team>(`/api/teams/${id}`),
   createTeam: (body: Partial<Team>) => request<Team>('/api/teams', { method: 'POST', body }),
-  updateTeam: (id: string, body: Partial<Team>) =>
+  // Admin edits apply at once; anyone else's edit comes back as a pending change request.
+  updateTeam: (id: string, body: Partial<Team> & { changeReason?: string }) =>
     request<{ applied: boolean; team?: Team; changeRequestId?: string; message?: string }>(
       `/api/teams/${id}`, { method: 'PATCH', body }),
+  // Admin: every request; anyone else: the requests they raised.
+  listChangeRequests: (status?: 'pending' | 'approved' | 'rejected') =>
+    request<TeamChangeRequest[]>(`/api/teams/change-requests${status ? `?status=${status}` : ''}`),
   decideChangeRequest: (id: string, status: 'approved' | 'rejected', comments?: string) =>
-    request<{ ok: boolean; status: string }>(
+    request<TeamChangeRequest>(
       `/api/teams/change-requests/${id}/decision`, { method: 'POST', body: { status, comments } }),
 
   // projects / workflow
@@ -190,4 +228,20 @@ export const api = {
   // dashboard
   dashboardStats: () => request<DashboardStats>('/api/dashboard/stats'),
   listMeetings: () => request<MeetingMinute[]>('/api/meetings'),
+
+  // shared documents (see lib/sharedStore.ts) — a save names the version it started from
+  getDocs: (keys: string[]) => request<SharedDoc[]>(`/api/docs?keys=${encodeURIComponent(keys.join(','))}`),
+  getDocsByKind: (kind: string) => request<SharedDoc[]>(`/api/docs/kind/${encodeURIComponent(kind)}`),
+  saveDoc: (key: string, data: unknown, baseVersion: number) =>
+    request<SharedDoc>('/api/docs', { method: 'PUT', body: { key, data, baseVersion } }),
+
+  // step document files
+  uploadFile: (scope: string, file: File) => {
+    const form = new FormData();
+    form.append('scope', scope);
+    form.append('file', file);
+    return request<StoredFileMeta>('/api/files', { method: 'POST', form });
+  },
+  downloadFile: (id: string) => request<Blob>(`/api/files/${encodeURIComponent(id)}`, { blob: true }),
+  deleteFile: (id: string) => request<{ ok: boolean }>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };

@@ -1,4 +1,5 @@
-import { useState, useMemo, useRef, type ReactNode } from 'react';
+import { useState, useMemo, useRef, useEffect, type ReactNode } from 'react';
+import { sharedStore } from '../lib/sharedStore';
 import {
   CheckCircle2, BarChart3, TrendingUp, Award, Plus, Trash2,
   ChevronDown, ChevronUp, Target, PieChart, IndianRupee, Paperclip, Download,
@@ -22,8 +23,8 @@ interface ResultMetric {
   evidence: string[];   // supporting document file names
 }
 
-let _uid = 700;
-const uid = () => `r${++_uid}`;
+// Ids must stay unique across reloads (they are saved), so they are random, not a counter.
+const uid = () => `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 const COLORS = { before: '#ef4444', target: '#3b82f6', actual: '#10b981', notAchieved: '#f59e0b' };
 
@@ -38,15 +39,17 @@ const STATUS_META: Record<MetricStatus, { label: string; cls: string; dot: strin
 const inr = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 
 // ─── Component ───────────────────────────────────────────
-export default function ResultsCheck() {
-  const [metrics, setMetrics] = useState<ResultMetric[]>([
-    { id: uid(), name: 'Defect Rate', unit: '%', beforeValue: 3.2, targetValue: 1.5, actualValue: 1.3, higherIsBetter: false, remark: 'Defect reduced significantly', evidence: ['inspection-report.pdf', 'trend-chart.png'] },
-    { id: uid(), name: 'Setup Time', unit: 'min', beforeValue: 45, targetValue: 27, actualValue: 25, higherIsBetter: false, remark: 'Setup standardization effective', evidence: ['smed-study.pdf'] },
-    { id: uid(), name: 'First Pass Yield', unit: '%', beforeValue: 92, targetValue: 98, actualValue: 97.5, higherIsBetter: true, remark: 'Improvement observed', evidence: ['fpy-log.xlsx'] },
-    { id: uid(), name: 'Output per Shift', unit: 'pcs', beforeValue: 180, targetValue: 220, actualValue: 235, higherIsBetter: true, remark: 'Productivity increased', evidence: ['output-data.xlsx', 'shift-report.pdf'] },
-    { id: uid(), name: 'Downtime', unit: 'hrs/wk', beforeValue: 8.5, targetValue: 4, actualValue: 3.2, higherIsBetter: false, remark: 'Downtime reduced', evidence: ['maintenance-log.pdf'] },
-  ]);
-  const [annualSaving, setAnnualSaving] = useState<number>(1845200);
+export default function ResultsCheck({ projectId }: { projectId: string }) {
+  // Saved per project on the server (shared by every PC); loaded before this step mounts.
+  // A new project starts empty — the team enters its own before / target / actual values.
+  const storageKey = `step-results/${projectId}`;
+  const [saved] = useState(() => sharedStore.get<{ metrics: ResultMetric[]; annualSaving: number }>(storageKey));
+  const [metrics, setMetrics] = useState<ResultMetric[]>(() => saved?.metrics ?? []);
+  const [annualSaving, setAnnualSaving] = useState<number>(() => saved?.annualSaving ?? 0);
+  useEffect(() => {
+    const t = setTimeout(() => sharedStore.set(storageKey, { metrics, annualSaving }), 500);
+    return () => clearTimeout(t);
+  }, [storageKey, metrics, annualSaving]);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const askConfirm = useConfirm();
   const fileInputs = useRef<Record<string, HTMLInputElement | null>>({});

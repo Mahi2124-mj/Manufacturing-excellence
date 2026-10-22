@@ -7,9 +7,14 @@ import {
 } from 'recharts';
 import { api, ApiError } from '../lib/api';
 import StatCard, { STAT_GRADIENTS } from '../components/StatCard';
-import { loadClosure } from '../components/FinalProjectClosure';
+import { loadClosure, CLOSURE_KEY } from '../components/FinalProjectClosure';
+import { sharedStore } from '../lib/sharedStore';
 import { useHalfYear } from '../lib/halfYear';
-import type { QCCProject, Team } from '../types';
+import { useActivitySteps } from '../lib/activitySteps';
+import { formatDate } from '../lib/format';
+import type { ActionItem, QCCProject, Team, User } from '../types';
+
+type ReportSet = { headers: string[]; rows: (string | number)[][] };
 
 // Trigger a browser download for a blob (no backend needed).
 function triggerDownload(blob: Blob, filename: string) {
@@ -47,23 +52,35 @@ export default function Reports() {
   // Live data — pulled from the same backend Team Registration & Projects write to, so
   // the charts and department performance auto-update as teams/projects change.
   const hy = useHalfYear();
+  const { workflowSteps } = useActivitySteps();
   const [rawProjects, setRawProjects] = useState<QCCProject[]>([]);
   const [rawTeams, setRawTeams] = useState<Team[]>([]);
+  const [rawActions, setRawActions] = useState<ActionItem[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Step 9 closure sheets of every project (saved on the server, shared by every PC).
+  const [closureDocs, setClosureDocs] = useState<Record<string, unknown>>({});
   const loadData = () => {
     setLoading(true);
-    Promise.all([api.listProjects(), api.listTeams()])
-      .then(([p, t]) => { setRawProjects(p); setRawTeams(t); setError(null); })
+    Promise.all([api.listProjects(), api.listTeams(), api.listActions(), api.listUsers()])
+      .then(async ([p, t, a, u]) => {
+        const closures = await sharedStore.loadKind('step-closure', p.map(x => CLOSURE_KEY(x.id))).catch(() => ({}));
+        setRawProjects(p); setRawTeams(t); setRawActions(a); setUsers(u); setClosureDocs(closures); setError(null);
+      })
       .catch(e => setError(e instanceof ApiError ? e.message : 'Failed to load report data'))
       .finally(() => setLoading(false));
   };
   useEffect(() => { loadData(); }, []);
 
-  // Scope everything to the QCC period chosen in the header (projects follow their team's period).
+  // Scope everything to the QCC period chosen in the header — projects (and their actions)
+  // follow their team's period, the same rule QCC Projects and the Dashboard use.
   const teams = useMemo(() => rawTeams.filter(t => hy.isTeamActive(t.id, t.createdAt)), [rawTeams, hy]);
-  const projects = useMemo(() => rawProjects.filter(p => hy.isTeamActive(p.teamId)), [rawProjects, hy]);
+  const projects = useMemo(() => rawProjects.filter(p => hy.isProjectActive(p.teamId, p.startedAt)), [rawProjects, hy]);
+  const actions = useMemo(() => { const ids = new Set(projects.map(p => p.id)); return rawActions.filter(a => ids.has(a.projectId)); }, [rawActions, projects]);
+  const totalSteps = workflowSteps.length || 7;
+  const approvedSteps = (p: QCCProject) => p.steps.filter(s => s.status === 'approved').length;
 
   // Departments come from the live teams (Team Registration) + any project department.
   const departments = useMemo(
@@ -74,8 +91,8 @@ export default function Reports() {
   // Projects closed & approved via Step 9 (Final Project Closure) — their savings count
   // as "realized" and they're flagged in the Project Impact chart & exports.
   const closedIds = useMemo(
-    () => new Set(projects.filter(p => loadClosure(p.id).approval?.decision === 'approved').map(p => p.id)),
-    [projects],
+    () => new Set(projects.filter(p => loadClosure(p.id, closureDocs[CLOSURE_KEY(p.id)] ?? null).approval?.decision === 'approved').map(p => p.id)),
+    [projects, closureDocs],
   );
   const closedCount = closedIds.size;
   const realizedSavings = useMemo(
@@ -88,13 +105,56 @@ export default function Reports() {
   const reportRows = (): (string | number)[][] =>
     projects.map(p => [p.title, p.department, p.status, closedIds.has(p.id) ? 'Closed & Approved' : 'Open', p.savings || 0, p.impactScore || 0]);
 
-  const exportProjectsCSV = (filename = 'qcc-projects-report.csv') =>
-    exportCSV(filename, REPORT_HEADERS, reportRows());
+  // Every downloadable report is built from the live, period-scoped records above.
+  const teamName = (id: string) => rawTeams.find(t => t.id === id)?.name || id;
+  const REPORTS: Record<string, { label: string; file: string; build: () => ReportSet }> = {
+    overview: { label: 'QCC Projects Report', file: 'qcc-projects-report', build: () => ({ headers: REPORT_HEADERS, rows: reportRows() }) },
+    department: {
+      label: 'Department-wise Analysis', file: 'qcc-department-report',
+      build: () => ({
+        headers: ['Department', 'Teams', 'Active Projects', 'Completed Projects', 'Savings (₹)'],
+        rows: departments.map(d => {
+          const dp = projects.filter(p => p.department === d);
+          return [d, teams.filter(t => t.department === d).length, dp.filter(p => p.status === 'in_progress').length, dp.filter(p => p.status === 'completed').length, dp.reduce((s, p) => s + (p.savings || 0), 0)];
+        }),
+      }),
+    },
+    team: {
+      label: 'Team Performance Scorecard', file: 'qcc-team-performance',
+      build: () => ({
+        headers: ['Team', 'Team ID', 'Department', 'Leader', 'Active Members', 'Project', 'Steps Approved', 'Team Status'],
+        rows: teams.map(t => {
+          const p = projects.find(x => x.teamId === t.id);
+          return [t.name, t.id, t.department, t.leaderName || '', t.members.filter(m => m.isActive).length, p?.title || '—', p ? `${approvedSteps(p)} / ${totalSteps}` : '—', t.status];
+        }),
+      }),
+    },
+    financial: {
+      label: 'Financial Impact Statement', file: 'qcc-financial-impact',
+      build: () => ({
+        headers: ['Project', 'Team', 'Department', 'Savings (₹)', 'Closure', 'Realized Savings (₹)'],
+        rows: projects.map(p => [p.title, teamName(p.teamId), p.department, p.savings || 0, closedIds.has(p.id) ? 'Closed & Approved' : 'Open', closedIds.has(p.id) ? p.savings || 0 : 0]),
+      }),
+    },
+    actions: {
+      label: 'Action Item Status Report', file: 'qcc-action-items',
+      build: () => ({
+        headers: ['Action', 'Project', 'Team', 'Assignee', 'Due Date', 'Priority', 'Status'],
+        rows: actions.map(a => {
+          const p = projects.find(x => x.id === a.projectId);
+          return [a.title, p?.title || a.projectId, p ? teamName(p.teamId) : '', users.find(u => u.id === a.assigneeId)?.name || '', a.dueDate || '', a.priority, a.status];
+        }),
+      }),
+    },
+  };
 
+  // Export uses the report picked with the report-type buttons.
   const handleExport = (format: 'excel' | 'pdf' | 'csv') => {
     setExportOpen(false);
-    if (format === 'excel') exportExcel('qcc-projects-report.xls', REPORT_HEADERS, reportRows());
-    else if (format === 'csv') exportCSV('qcc-projects-report.csv', REPORT_HEADERS, reportRows());
+    const r = REPORTS[reportType] || REPORTS.overview;
+    const { headers, rows } = r.build();
+    if (format === 'excel') exportExcel(`${r.file}.xls`, headers, rows);
+    else if (format === 'csv') exportCSV(`${r.file}.csv`, headers, rows);
     else window.print(); // PDF via the browser's print-to-PDF dialog
   };
 
@@ -119,33 +179,42 @@ export default function Reports() {
     closed: closedIds.has(p.id),
   })), [projects, closedIds]);
 
-  // Real data-driven performance snapshot (0-100 per dimension).
+  // Real data-driven performance snapshot (0-100 per dimension), one distinct measure each.
   const radarData = useMemo(() => {
     const projCount = Math.max(1, projects.length);
+    const today = new Date().toISOString().slice(0, 10);
     const avgImpact = Math.round(projects.reduce((s, p) => s + (p.impactScore || 0), 0) / projCount);
-    const completedPct = Math.round((projects.filter(p => p.status === 'completed').length / projCount) * 100);
-    const onTrackPct = Math.round((projects.filter(p => p.status !== 'on_hold').length / projCount) * 100);
+    const isDone = (p: QCCProject) => p.status === 'completed' || approvedSteps(p) >= totalSteps;
+    // Timeline: projects not past their target date while unfinished.
+    const onTimePct = Math.round((projects.filter(p => isDone(p) || !p.targetCompletion || p.targetCompletion.slice(0, 10) >= today).length / projCount) * 100);
     const activeTeamPct = Math.round((teams.filter(t => t.status === 'active').length / Math.max(1, teams.length)) * 100);
     const savingsScore = Math.min(100, Math.round(projects.reduce((s, p) => s + (p.savings || 0), 0) / 10000));
+    // Progress: average share of workflow steps approved.
+    const progressPct = Math.round(projects.reduce((s, p) => s + Math.min(1, approvedSteps(p) / totalSteps), 0) / projCount * 100);
+    // Standardization: projects whose Standardization step has been approved.
+    const stdNo = workflowSteps.findIndex(s => s.workflowKey === 'standardization') + 1;
+    const stdPct = stdNo > 0 ? Math.round((projects.filter(p => p.steps.find(s => s.stepNumber === stdNo)?.status === 'approved').length / projCount) * 100) : 0;
     return [
       { metric: 'Quality', A: avgImpact, fullMark: 100 },
       { metric: 'Cost Savings', A: savingsScore, fullMark: 100 },
-      { metric: 'Timeline', A: onTrackPct, fullMark: 100 },
+      { metric: 'Timeline', A: onTimePct, fullMark: 100 },
       { metric: 'Team Work', A: activeTeamPct, fullMark: 100 },
-      { metric: 'Innovation', A: avgImpact, fullMark: 100 },
-      { metric: 'Standardization', A: completedPct, fullMark: 100 },
+      { metric: 'Progress', A: progressPct, fullMark: 100 },
+      { metric: 'Standardization', A: stdPct, fullMark: 100 },
     ];
-  }, [projects, teams]);
+  }, [projects, teams, workflowSteps, totalSteps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const totalSavings = projects.reduce((s, p) => s + (p.savings || 0), 0);
   const avgImpactScore = projects.length ? Math.round(projects.reduce((s, p) => s + (p.impactScore || 0), 0) / projects.length) : 0;
   const activeTeams = teams.filter(t => t.status === 'active').length;
 
+  // Picks which report the Export button downloads.
   const reportTypes = [
     { id: 'overview', label: 'Overview Report' },
     { id: 'department', label: 'Department Report' },
     { id: 'team', label: 'Team Performance' },
     { id: 'financial', label: 'Financial Impact' },
+    { id: 'actions', label: 'Action Items' },
   ];
 
   return (
@@ -319,34 +388,28 @@ export default function Reports() {
           </div>
         </div>
         <div className="divide-y divide-slate-100">
-          {[
-            { name: 'QCC Cycle Summary Report', type: 'PDF', date: '2024-08-01', size: '2.4 MB' },
-            { name: 'Department-wise Analysis', type: 'Excel', date: '2024-08-01', size: '1.8 MB' },
-            { name: 'Team Performance Scorecard', type: 'PDF', date: '2024-07-28', size: '3.1 MB' },
-            { name: 'Financial Impact Statement', type: 'Excel', date: '2024-07-25', size: '0.9 MB' },
-            { name: 'Action Item Status Report', type: 'PDF', date: '2024-08-02', size: '1.2 MB' },
-            { name: 'Meeting Minutes Compilation', type: 'PDF', date: '2024-08-01', size: '4.5 MB' },
-          ].map((report, i) => (
+          {Object.values(REPORTS).map((r, i) => {
+            const report = { name: r.label, rows: r.build().rows.length };
+            return (
             <div key={i} className="flex items-center justify-between px-6 py-3 hover:bg-slate-50 transition-colors">
               <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                  report.type === 'PDF' ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'
-                }`}>
-                  {report.type === 'PDF' ? <FileText size={16} /> : <FileSpreadsheet size={16} />}
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-emerald-100 text-emerald-600">
+                  <FileSpreadsheet size={16} />
                 </div>
                 <div>
                   <p className="text-sm font-medium text-slate-800">{report.name}</p>
-                  <p className="text-[10px] text-slate-500">{report.type} • {report.size} • {report.date}</p>
+                  <p className="text-[10px] text-slate-500">CSV • {report.rows} row{report.rows === 1 ? '' : 's'} • live data, {formatDate(new Date())}</p>
                 </div>
               </div>
               <button
-                onClick={() => exportProjectsCSV(`${report.name.replace(/\s+/g, '-').toLowerCase()}.csv`)}
+                onClick={() => { const { headers, rows } = r.build(); exportCSV(`${r.file}.csv`, headers, rows); }}
                 title={`Download ${report.name}`}
                 className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-blue-600 transition-colors">
                 <Download size={16} />
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

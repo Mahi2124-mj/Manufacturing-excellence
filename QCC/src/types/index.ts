@@ -41,13 +41,13 @@ export interface TeamChangeRequest {
   reviewedBy?: string;
   reviewedAt?: string;
   reviewComments?: string;
-  changeReason: string;
+  changeReason?: string;
   changes: {
     field: string;
     oldValue: string;
     newValue: string;
   }[];
-  snapshot: Partial<Team>;
+  snapshot?: Partial<Team>;
 }
 
 export interface Team {

@@ -1,17 +1,35 @@
-import { useState, useEffect, useMemo, Fragment } from 'react';
-import { Plus, Trash2, Info, ArrowUp, ArrowDown, Minus, Users, ArrowRight, Save, Check, X, Building2, ChevronDown, ChevronUp } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
+import { Plus, Trash2, Info, ArrowUp, ArrowDown, Minus, Users, ArrowRight, Save, Check, X, Building2, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import { CIRCLE_ASSESSMENT, circleLevel, type AssessCategory } from '../lib/circleAssessment';
 import { api } from '../lib/api';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useHalfYear } from '../lib/halfYear';
+import { sharedStore } from '../lib/sharedStore';
+import { SaveStatusLine } from '../components/SharedDocs';
 import type { Team } from '../types';
 
-const STORAGE_KEY = 'qcc-circle-assessment-v4';
+// Each team's assessment is its own document on the server (shared by every PC).
+// Older versions kept one assessment in this browser only (LEGACY_KEY).
+const assessKey = (teamId: string) => `team-assessment/${teamId}`;
+const LEGACY_KEY = 'qcc-circle-assessment-v4';
 type Phase = 'before' | 'after';
 
 interface Member { id: string; name: string; }
 // checked[memberId][phase] = set of "catCode:itemIndex"
 type Checked = Record<string, Record<Phase, Set<string>>>;
+type SerialChecked = Record<string, { before: string[]; after: string[] }>;
+interface SavedAssessment { info?: Record<string, string>; members?: Member[]; checked?: SerialChecked; summary?: unknown }
+
+const serialize = (c: Checked): SerialChecked => {
+  const out: SerialChecked = {};
+  for (const [mid, p] of Object.entries(c)) out[mid] = { before: [...p.before], after: [...p.after] };
+  return out;
+};
+const deserialize = (c: SerialChecked | undefined): Checked => {
+  const out: Checked = {};
+  for (const [mid, p] of Object.entries(c || {})) out[mid] = { before: new Set(p?.before || []), after: new Set(p?.after || []) };
+  return out;
+};
 
 const EMPTY_INFO = { circleName: '', department: '', date: '', leader: '', advisor: '' };
 const CATS_X = CIRCLE_ASSESSMENT[0].categories;
@@ -65,30 +83,45 @@ export default function CircleAssessment() {
   useEffect(() => { try { localStorage.setItem('qcc-assessment-view', skillView); } catch { /* ignore */ } }, [skillView]);
   useEffect(() => { try { localStorage.setItem('qcc-assessment-team', teamId); } catch { /* ignore */ } }, [teamId]);
 
+  // ── Load the selected team's assessment from the server ──
+  // loadedFor names the team whose data is on screen; nothing is saved until it matches
+  // the selected team, so one team's ticks can never land in another team's record.
+  const [loadedFor, setLoadedFor] = useState('');
+  const [loadError, setLoadError] = useState('');
+  const [round, setRound] = useState(0);              // bumps to re-read after a conflict
+  const pristineRef = useRef('');                     // what was shown before any edit
+  const legacyTeamRef = useRef(teamId);               // the team the old browser-only record belonged to
   useEffect(() => {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    try {
-      const s = JSON.parse(raw);
-      setInfo({ ...EMPTY_INFO, ...s.info });
-      setMembers(s.members || []);
-      const c: Checked = {};
-      for (const [mid, phases] of Object.entries(s.checked || {})) {
-        c[mid] = { before: new Set((phases as any).before || []), after: new Set((phases as any).after || []) };
+    if (!teamId || !teams.length) { setLoadedFor(''); return; }
+    let cancelled = false;
+    setLoadedFor(''); setLoadError('');
+    const key = assessKey(teamId);
+    sharedStore.load([key], { force: true }).then(() => {
+      if (cancelled) return;
+      const team = teams.find(t => t.id === teamId);
+      let doc = sharedStore.get<SavedAssessment>(key);
+      let fromLegacy = false;
+      // One-time move of the old browser-only record, if it was this team's.
+      if (!doc && sharedStore.canEdit(key) && teamId === legacyTeamRef.current) {
+        try {
+          const old = JSON.parse(localStorage.getItem(LEGACY_KEY) || 'null') as SavedAssessment | null;
+          if (old && (!old.info?.circleName || old.info.circleName === team?.name)) { doc = old; fromLegacy = true; }
+        } catch { /* ignore */ }
       }
-      setChecked(c);
-      setActiveId((s.members || [])[0]?.id ?? null);
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      const serial: Record<string, { before: string[]; after: string[] }> = {};
-      for (const [mid, p] of Object.entries(checked)) serial[mid] = { before: [...p.before], after: [...p.after] };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ info, members, checked: serial }));
-    }, 400);
-    return () => clearTimeout(t);
-  }, [info, members, checked]);
+      const nextInfo = doc ? { ...EMPTY_INFO, ...doc.info } : {
+        ...EMPTY_INFO, circleName: team?.name || '', department: team?.department || '',
+        leader: team?.leaderName || '', advisor: team?.facilitatorName || '',
+      };
+      const nextMembers: Member[] = doc ? (doc.members || [])
+        : (team?.members || []).filter(m => m.isActive).map(m => ({ id: m.memberId, name: m.memberName }));
+      const nextChecked = deserialize(doc?.checked);
+      setInfo(nextInfo); setMembers(nextMembers); setChecked(nextChecked);
+      setActiveId(nextMembers[0]?.id ?? null);
+      pristineRef.current = fromLegacy ? '' : JSON.stringify({ info: nextInfo, members: nextMembers, checked: serialize(nextChecked) });
+      setLoadedFor(teamId);
+    }).catch(e => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Could not load this assessment'); });
+    return () => { cancelled = true; };
+  }, [teamId, teams, round]);
 
   const addMember = () => {
     const name = newName.trim();
@@ -107,28 +140,13 @@ export default function CircleAssessment() {
   // Load teams from Team Registration for the team picker.
   useEffect(() => { api.listTeams().then(setTeams).catch(() => { /* keep empty */ }); }, []);
 
-  // Selecting a team auto-fills its members + header details — no manual entry needed.
-  const selectTeam = (id: string) => {
-    setTeamId(id);
-    const team = teams.find(t => t.id === id);
-    if (!team) return;
-    const teamMembers: Member[] = team.members.filter(m => m.isActive).map(m => ({ id: m.memberId, name: m.memberName }));
-    setMembers(teamMembers);
-    setActiveId(teamMembers[0]?.id ?? null);
-    setInfo(prev => ({
-      ...prev,
-      circleName: team.name,
-      department: team.department,
-      leader: team.leaderName || '',
-      advisor: team.facilitatorName || '',
-    }));
-  };
+  // Selecting a team loads its saved assessment; a team not assessed yet starts from its
+  // registered members + header details — no manual entry needed.
+  const selectTeam = (id: string) => setTeamId(id);
 
-  // Explicit save — writes the whole assessment to storage and flashes a confirmation.
+  // Explicit save — sends the assessment to the server now and flashes a confirmation.
   const saveAll = () => {
-    const serial: Record<string, { before: string[]; after: string[] }> = {};
-    for (const [mid, p] of Object.entries(checked)) serial[mid] = { before: [...p.before], after: [...p.after] };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ info, members, checked: serial }));
+    sharedStore.flush();
     setSavedMsg(true);
     setTimeout(() => setSavedMsg(false), 2500);
   };
@@ -169,20 +187,23 @@ export default function CircleAssessment() {
   const improvePct = (B.x + B.y) > 0 ? Math.round((((A.x + A.y) - (B.x + B.y)) / (B.x + B.y)) * 100) : 0;
   const active = members.find(m => m.id === activeId) || null;
 
-  // Persist a per-team assessment summary so the Dashboard's Improvement chart has data.
-  // Value = Before→After % when a baseline exists; otherwise the After achievement %
+  // Auto-save the team's assessment, with a summary for the Dashboard's Improvement chart.
+  // Summary value = Before→After % when a baseline exists; otherwise the After achievement %
   // (so a team scored on "After" only still shows a meaningful number on the dashboard).
+  // A team only opened (nothing entered yet) is not saved, so it doesn't count as assessed.
   useEffect(() => {
-    if (!teamId) return;
+    if (!teamId || loadedFor !== teamId) return;
+    const key = assessKey(teamId);
+    const body = { info, members, checked: serialize(checked) };
+    if (sharedStore.get(key) == null && JSON.stringify(body) === pristineRef.current) return;
+    const assessed = (B.x + B.y + A.x + A.y) > 0;
     const afterPct = Math.round(((A.x + A.y) / 20) * 100);
-    const value = (B.x + B.y) > 0 ? improvePct : afterPct;
-    try {
-      const raw = localStorage.getItem('qcc-assessment-summary-v1');
-      const map = raw ? JSON.parse(raw) : {};
-      map[teamId] = { improvement: value, improvePct, afterPct, beforeX: +B.x.toFixed(1), beforeY: +B.y.toFixed(1), afterX: +A.x.toFixed(1), afterY: +A.y.toFixed(1) };
-      localStorage.setItem('qcc-assessment-summary-v1', JSON.stringify(map));
-    } catch { /* ignore */ }
-  }, [teamId, improvePct, B.x, B.y, A.x, A.y]);
+    const summary = assessed ? {
+      improvement: (B.x + B.y) > 0 ? improvePct : afterPct, improvePct, afterPct,
+      beforeX: +B.x.toFixed(1), beforeY: +B.y.toFixed(1), afterX: +A.x.toFixed(1), afterY: +A.y.toFixed(1),
+    } : null;
+    sharedStore.set(key, { ...body, summary });
+  }, [teamId, loadedFor, info, members, checked, improvePct, B.x, B.y, A.x, A.y]);
 
   // Summary KPI cards act as jump-links: click one to scroll to & highlight its section.
   const [activeKpi, setActiveKpi] = useState<string | null>(null);
@@ -250,6 +271,18 @@ export default function CircleAssessment() {
             </div>
           ))}
         </div>
+        {teamId && (
+          <div className="mt-3">
+            {loadError ? (
+              <p className="flex items-center justify-end gap-2 text-xs font-medium text-red-600">Could not load this team's assessment: {loadError}
+                <button onClick={() => setRound(r => r + 1)} className="underline font-semibold">Retry</button></p>
+            ) : loadedFor !== teamId ? (
+              <p className="flex items-center justify-end gap-1.5 text-xs text-slate-500"><Loader2 size={13} className="animate-spin" /> Loading saved assessment…</p>
+            ) : (
+              <SaveStatusLine keys={[assessKey(teamId)]} onReload={() => setRound(r => r + 1)} />
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── View toggle: Summary / Before / After ── */}

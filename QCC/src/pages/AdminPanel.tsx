@@ -4,26 +4,34 @@ import {
   ToggleLeft, ToggleRight, Search, Lock, Unlock,
   Building2, Plus, ChevronDown, GitBranch, X, Save,
   FolderTree, ListChecks, Check, Eye, Loader2, Wifi,
-  RefreshCw, Network, Sliders, Bell, Users2, CalendarClock
+  RefreshCw, Network, Sliders, Bell, Users2, CalendarClock, KeyRound, GitPullRequest
 } from 'lucide-react';
-import { mockUsers, mockDepartments, DEPARTMENTS, mockSubDepartments } from '../lib/data';
-import { ROLE_LABELS, ROLE_COLORS } from '../lib/auth';
+import { mockDepartments, DEPARTMENTS, mockSubDepartments } from '../lib/data';
+import { ROLE_LABELS, ROLE_COLORS, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { formatDateTime } from '../lib/format';
 import { useHalfYear } from '../lib/halfYear';
 import { useCycles } from '../lib/cycles';
 import { useActivitySteps } from '../lib/activitySteps';
 import { useHierarchy } from '../lib/hierarchy';
-import type { UserRole, SubDepartment, Team, QCCProject } from '../types';
+import type { User, UserRole, SubDepartment, Team, QCCProject, TeamChangeRequest } from '../types';
 import ActivityStepsSettings from './ActivityStepsSettings';
 import CreateMeetingSchedule from './CreateMeetingSchedule';
 import { useConfirm } from '../components/ConfirmDialog';
 
-type AdminTab = 'users' | 'teams' | 'cycles' | 'meetingSchedule' | 'hierarchy' | 'activitySteps' | 'settings';
+type AdminTab = 'users' | 'teams' | 'changeRequests' | 'cycles' | 'meetingSchedule' | 'hierarchy' | 'activitySteps' | 'settings';
+
+// Backend field names in a team change request → labels the reviewer reads.
+const CR_FIELD_LABELS: Record<string, string> = {
+  name: 'Team Name', department: 'Department', sub_department: 'Sub Department',
+  leader_name: 'Leader', facilitator_name: 'Facilitator', coordinator_name: 'Coordinator',
+  project_theme: 'Project Theme', project_title: 'Project Title', status: 'Status', members: 'Members',
+};
 
 export default function AdminPanel() {
   const askConfirm = useConfirm();
   const [activeTab, setActiveTab] = useState<AdminTab>(() => {
-    try { const v = localStorage.getItem('qcc-admin-tab') as AdminTab | null; if (v && ['users', 'teams', 'cycles', 'meetingSchedule', 'hierarchy', 'activitySteps', 'settings'].includes(v)) return v; } catch { /* default */ }
+    try { const v = localStorage.getItem('qcc-admin-tab') as AdminTab | null; if (v && ['users', 'teams', 'changeRequests', 'cycles', 'meetingSchedule', 'hierarchy', 'activitySteps', 'settings'].includes(v)) return v; } catch { /* default */ }
     return 'users';
   });
   useEffect(() => { try { localStorage.setItem('qcc-admin-tab', activeTab); } catch { /* ignore */ } }, [activeTab]);
@@ -80,9 +88,25 @@ export default function AdminPanel() {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editingNodeName, setEditingNodeName] = useState('');
 
-  // Users are editable now (role = the management right). Backed by state so edit/delete work.
-  const [users, setUsers] = useState(mockUsers);
+  // Users come from the backend; create / role / activation / password reset are saved to the DB.
+  const { user: me } = useAuth();
+  const [users, setUsers] = useState<User[]>([]);
+  const [usersError, setUsersError] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [busyUser, setBusyUser] = useState<string | null>(null);
+  const blankUserForm = { name: '', email: '', role: 'member' as UserRole, department: '', password: '' };
+  const [userForm, setUserForm] = useState(blankUserForm);
+  const [userMsg, setUserMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [resetTarget, setResetTarget] = useState<User | null>(null);
+  const [resetPw, setResetPw] = useState('');
+  const errText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong');
+  const flashUserMsg = (ok: boolean, text: string) => { setUserMsg({ ok, text }); setTimeout(() => setUserMsg(null), 5000); };
+
+  const loadUsers = useCallback(async () => {
+    try { setUsers(await api.listUsers()); setUsersError(null); }
+    catch (e) { setUsersError(errText(e)); }
+  }, []);
+  useEffect(() => { if (activeTab === 'users') loadUsers(); }, [activeTab, loadUsers]);
 
   // ── Team Control: auto-synced from Team Registration (no manual entry here) ──
   const hy = useHalfYear();
@@ -121,6 +145,38 @@ export default function AdminPanel() {
     return () => { window.removeEventListener('focus', onFocus); clearInterval(iv); };
   }, [activeTab, syncTeams]);
   useEffect(() => { hy.registerDates(teams.map(t => t.createdAt)); }, [teams]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Team change requests: non-admin team edits wait here until an Admin decides ──
+  const [changeRequests, setChangeRequests] = useState<TeamChangeRequest[]>([]);
+  const [crFilter, setCrFilter] = useState<'pending' | 'all'>('pending');
+  const [crComments, setCrComments] = useState<Record<string, string>>({});
+  const [crBusy, setCrBusy] = useState<string | null>(null);
+  const [crMsg, setCrMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const flashCrMsg = (ok: boolean, text: string) => { setCrMsg({ ok, text }); setTimeout(() => setCrMsg(null), 6000); };
+  const loadChangeRequests = useCallback(async () => {
+    try { setChangeRequests(await api.listChangeRequests()); }
+    catch (e) { flashCrMsg(false, `Could not load change requests: ${errText(e)}`); }
+  }, []);
+  // Load on open (for the pending badge on the tab) and whenever the tab is shown.
+  useEffect(() => { loadChangeRequests(); }, [loadChangeRequests]);
+  useEffect(() => { if (activeTab === 'changeRequests') { loadChangeRequests(); loadUsers(); } }, [activeTab, loadChangeRequests, loadUsers]);
+  const pendingCrCount = changeRequests.filter(c => c.status === 'pending').length;
+  const visibleCrs = changeRequests.filter(c => crFilter === 'all' || c.status === 'pending');
+  const userName = (id?: string) => users.find(u => u.id === id)?.name || id || '—';
+
+  const decideChangeRequest = async (cr: TeamChangeRequest, status: 'approved' | 'rejected') => {
+    const comments = (crComments[cr.id] || '').trim();
+    if (status === 'rejected' && !comments) { flashCrMsg(false, 'Write a reason before rejecting — the requester sees it'); return; }
+    setCrBusy(cr.id);
+    try {
+      await api.decideChangeRequest(cr.id, status, comments || undefined);
+      flashCrMsg(true, status === 'approved' ? `Approved — ${cr.teamName} is updated` : `Rejected — ${cr.requestedByName} can see your reason`);
+      setCrComments(prev => { const n = { ...prev }; delete n[cr.id]; return n; });
+      await loadChangeRequests();
+      syncTeams();
+    } catch (e) { flashCrMsg(false, errText(e)); }
+    finally { setCrBusy(null); }
+  };
 
   const setLock = (teamId: string, locked: boolean) => {
     setTeamLocks(prev => {
@@ -165,12 +221,49 @@ export default function AdminPanel() {
   const visibleTeams = teams.filter(t => hy.isTeamActive(t.id, t.createdAt));
   const viewTeam = teams.find(t => t.id === viewTeamId) || null;
 
-  const deleteUser = (id: string) => {
-    setUsers(prev => prev.filter(u => u.id !== id));
-    if (editingUserId === id) setEditingUserId(null);
+  const createUser = async () => {
+    const f = { ...userForm, name: userForm.name.trim(), email: userForm.email.trim() };
+    if (!f.name || !f.email || !f.department) { flashUserMsg(false, 'Name, email and department are required'); return; }
+    if (f.password.length < 6) { flashUserMsg(false, 'Password must be at least 6 characters'); return; }
+    setBusyUser('new');
+    try {
+      const created = await api.createUser(f);
+      setUserForm(blankUserForm); setShowUserForm(false);
+      await loadUsers();
+      flashUserMsg(true, `${created.name} can now sign in with username "${created.email.split('@')[0]}"`);
+    } catch (e) { flashUserMsg(false, errText(e)); }
+    finally { setBusyUser(null); }
   };
-  const updateUserRole = (id: string, role: UserRole) =>
-    setUsers(prev => prev.map(u => (u.id === id ? { ...u, role } : u)));
+  const updateUserRole = async (u: User, role: UserRole) => {
+    setBusyUser(u.id);
+    try {
+      const saved = await api.updateUser(u.id, { role });
+      setUsers(prev => prev.map(x => (x.id === u.id ? saved : x)));
+      flashUserMsg(true, `${u.name} is now ${ROLE_LABELS[role]}`);
+    } catch (e) { flashUserMsg(false, errText(e)); }
+    finally { setBusyUser(null); }
+  };
+  const toggleUserActive = async (u: User) => {
+    if (u.isActive && !(await askConfirm({ title: `Deactivate ${u.name}?`, message: 'They are signed out and cannot log in until you activate them again.', confirmText: 'Deactivate' }))) return;
+    setBusyUser(u.id);
+    try {
+      const saved = await api.updateUser(u.id, { isActive: !u.isActive });
+      setUsers(prev => prev.map(x => (x.id === u.id ? saved : x)));
+      flashUserMsg(true, `${u.name} ${saved.isActive ? 'activated' : 'deactivated'}`);
+    } catch (e) { flashUserMsg(false, errText(e)); }
+    finally { setBusyUser(null); }
+  };
+  const submitPasswordReset = async () => {
+    if (!resetTarget) return;
+    if (resetPw.length < 6) { flashUserMsg(false, 'Password must be at least 6 characters'); return; }
+    setBusyUser(resetTarget.id);
+    try {
+      await api.resetUserPassword(resetTarget.id, resetPw);
+      flashUserMsg(true, `Password reset for ${resetTarget.name} — they must sign in again with the new password`);
+      setResetTarget(null); setResetPw('');
+    } catch (e) { flashUserMsg(false, errText(e)); }
+    finally { setBusyUser(null); }
+  };
 
   // Create a QCC cycle → it saves, becomes active, and its year appears in the header period dropdown.
   // Teams are grouped by the cycle's YEAR, so a brand-new cycle must be a new year — that is
@@ -195,6 +288,7 @@ export default function AdminPanel() {
   const tabs: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
     { id: 'users', label: 'User Management', icon: <Users size={16} /> },
     { id: 'teams', label: 'Team Control', icon: <Building2 size={16} /> },
+    { id: 'changeRequests', label: `Change Requests${pendingCrCount ? ` (${pendingCrCount})` : ''}`, icon: <GitPullRequest size={16} /> },
     { id: 'cycles', label: 'QCC Cycles', icon: <Calendar size={16} /> },
     { id: 'meetingSchedule', label: 'Meeting Scheduling', icon: <CalendarClock size={16} /> },
     { id: 'hierarchy', label: 'Dept Hierarchy', icon: <FolderTree size={16} /> },
@@ -268,24 +362,34 @@ export default function AdminPanel() {
             </button>
           </div>
 
+          {userMsg && (
+            <div className={`rounded-lg border px-4 py-2.5 text-sm ${userMsg.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700'}`}>{userMsg.text}</div>
+          )}
+          {usersError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 flex items-center justify-between gap-3">
+              <span>Could not load users: {usersError}</span>
+              <button onClick={loadUsers} className="text-xs font-semibold underline">Retry</button>
+            </div>
+          )}
+
           {showUserForm && (
             <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
               <div className="flex items-center gap-2.5 mb-4">
                 <span className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0"><UserPlus size={16} /></span>
                 <h3 className="text-sm font-semibold text-slate-800">Add New User</h3>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Full Name</label>
-                  <input type="text" placeholder="Enter name" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none" />
+                  <input type="text" placeholder="Enter name" value={userForm.name} onChange={e => setUserForm(f => ({ ...f, name: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Email</label>
-                  <input type="email" placeholder="Enter email" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none" />
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Email (login ID)</label>
+                  <input type="email" placeholder="Enter email" value={userForm.email} onChange={e => setUserForm(f => ({ ...f, email: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none" />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Role</label>
-                  <select className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white outline-none">
+                  <select value={userForm.role} onChange={e => setUserForm(f => ({ ...f, role: e.target.value as UserRole }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white outline-none">
                     {Object.entries(ROLE_LABELS).map(([key, label]) => (
                       <option key={key} value={key}>{label}</option>
                     ))}
@@ -293,14 +397,37 @@ export default function AdminPanel() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Department</label>
-                  <select className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white outline-none">
+                  <select value={userForm.department} onChange={e => setUserForm(f => ({ ...f, department: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white outline-none">
+                    <option value="">Select department</option>
                     {hier.departments.map(d => <option key={d} value={d}>{d}</option>)}
                   </select>
                 </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Password</label>
+                  <input type="password" placeholder="Min 6 characters" autoComplete="new-password" value={userForm.password} onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none" />
+                </div>
               </div>
+              <p className="mt-3 text-[11px] text-slate-500">Login username = the part of the email before "@" (amit@qcc.com → <span className="font-mono">amit</span>). Use the exact name written in Team Registration (Leader / Facilitator / Coordinator / Member) — teams are matched to users by name.</p>
               <div className="flex justify-end gap-2 mt-4">
-                <button onClick={() => setShowUserForm(false)} className="px-4 py-2 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
-                <button onClick={() => setShowUserForm(false)} className="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg">Create User</button>
+                <button onClick={() => { setShowUserForm(false); setUserForm(blankUserForm); }} className="px-4 py-2 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
+                <button onClick={createUser} disabled={busyUser === 'new'} className="inline-flex items-center gap-2 px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50">{busyUser === 'new' && <Loader2 size={14} className="animate-spin" />} Create User</button>
+              </div>
+            </div>
+          )}
+
+          {resetTarget && (
+            <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/50" onClick={() => { setResetTarget(null); setResetPw(''); }}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+                <div className="flex items-center gap-2.5 mb-3">
+                  <span className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0"><KeyRound size={16} /></span>
+                  <div><h3 className="text-sm font-semibold text-slate-800">Reset password</h3><p className="text-[11px] text-slate-500">{resetTarget.name} · {resetTarget.email}</p></div>
+                </div>
+                <input type="password" autoFocus autoComplete="new-password" placeholder="New password (min 6 characters)" value={resetPw} onChange={e => setResetPw(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submitPasswordReset(); }} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-200" />
+                <p className="mt-2 text-[11px] text-slate-500">They are signed out everywhere and must sign in with this new password.</p>
+                <div className="flex justify-end gap-2 mt-4">
+                  <button onClick={() => { setResetTarget(null); setResetPw(''); }} className="px-4 py-2 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
+                  <button onClick={submitPasswordReset} disabled={busyUser === resetTarget.id} className="inline-flex items-center gap-2 px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50">{busyUser === resetTarget.id && <Loader2 size={14} className="animate-spin" />} Reset Password</button>
+                </div>
               </div>
             </div>
           )}
@@ -328,7 +455,7 @@ export default function AdminPanel() {
                           </div>
                           <div>
                             <p className="text-sm font-medium text-slate-800">{u.name}</p>
-                            <p className="text-[10px] text-slate-500">{u.email}</p>
+                            <p className="text-[10px] text-slate-500">Username: <span className="font-mono font-semibold text-slate-700">{u.email.split('@')[0]}</span> · {u.email}</p>
                           </div>
                         </div>
                       </td>
@@ -336,7 +463,8 @@ export default function AdminPanel() {
                         {editingUserId === u.id ? (
                           <select
                             value={u.role}
-                            onChange={e => updateUserRole(u.id, e.target.value as UserRole)}
+                            disabled={busyUser === u.id}
+                            onChange={e => updateUserRole(u, e.target.value as UserRole)}
                             className="px-2 py-1 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-blue-400"
                           >
                             {Object.entries(ROLE_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
@@ -356,6 +484,9 @@ export default function AdminPanel() {
                       </td>
                       <td className="px-5 py-3 text-xs text-slate-500">{u.joinedAt}</td>
                       <td className="px-5 py-3">
+                        {u.id === me?.id ? (
+                          <p className="text-right text-[10px] text-slate-400">You · change your password in Settings</p>
+                        ) : (
                         <div className="flex items-center justify-end gap-1">
                           <button
                             onClick={() => setEditingUserId(editingUserId === u.id ? null : u.id)}
@@ -365,13 +496,22 @@ export default function AdminPanel() {
                             {editingUserId === u.id ? <Check size={14} /> : <Edit2 size={14} />}
                           </button>
                           <button
-                            onClick={async () => { if (await askConfirm({ title: 'Delete this user?', message: 'This action cannot be undone.', confirmText: 'Delete' })) deleteUser(u.id); }}
-                            title="Delete user"
-                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-red-600 transition-colors"
+                            onClick={() => { setResetTarget(u); setResetPw(''); }}
+                            title="Reset password"
+                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-amber-600 transition-colors"
                           >
-                            <Trash2 size={14} />
+                            <KeyRound size={14} />
+                          </button>
+                          <button
+                            onClick={() => toggleUserActive(u)}
+                            disabled={busyUser === u.id}
+                            title={u.isActive ? 'Deactivate user' : 'Activate user'}
+                            className={`p-1.5 rounded-lg hover:bg-slate-100 transition-colors disabled:opacity-50 ${u.isActive ? 'text-emerald-600 hover:text-red-600' : 'text-slate-400 hover:text-emerald-600'}`}
+                          >
+                            {u.isActive ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
                           </button>
                         </div>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -379,6 +519,77 @@ export default function AdminPanel() {
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Change Requests Tab — team edits by non-admins, applied only when approved here */}
+      {activeTab === 'changeRequests' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800">Team change requests</h3>
+              <p className="text-xs text-slate-500">Edits made by Leaders, Facilitators and Coordinators wait here. Approve to apply them to the team, or reject with a reason.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              {(['pending', 'all'] as const).map(f => (
+                <button key={f} onClick={() => setCrFilter(f)} className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${crFilter === f ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}>
+                  {f === 'pending' ? `Pending (${pendingCrCount})` : `All (${changeRequests.length})`}
+                </button>
+              ))}
+              <button onClick={loadChangeRequests} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50"><RefreshCw size={13} /> Refresh</button>
+            </div>
+          </div>
+
+          {crMsg && (
+            <div className={`rounded-lg border px-4 py-2.5 text-sm ${crMsg.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700'}`}>{crMsg.text}</div>
+          )}
+
+          {visibleCrs.length === 0 ? (
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-10 text-center">
+              <GitPullRequest size={28} className="mx-auto text-slate-300 mb-2" />
+              <p className="text-sm font-medium text-slate-600">{crFilter === 'pending' ? 'No team changes are waiting for approval' : 'No team change requests yet'}</p>
+            </div>
+          ) : visibleCrs.map(cr => (
+            <div key={cr.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-sm font-bold text-slate-800">{cr.teamName || cr.teamId} <span className="font-mono text-xs font-medium text-blue-600">{cr.teamId}</span></p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">{cr.id} · requested by <b className="text-slate-700">{cr.requestedByName || cr.requestedBy}</b>{cr.requestedAt ? ` on ${formatDateTime(cr.requestedAt)}` : ''}</p>
+                </div>
+                <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold capitalize ${cr.status === 'pending' ? 'bg-amber-100 text-amber-700' : cr.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{cr.status}</span>
+              </div>
+              {cr.changeReason && <p className="mt-3 text-xs text-slate-600"><span className="font-semibold">Reason:</span> {cr.changeReason}</p>}
+              <div className="mt-3 border border-slate-200 rounded-lg overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-50"><tr>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500 w-36">Field</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500">Current</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500">Proposed</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {cr.changes.map((c, i) => (
+                      <tr key={i}>
+                        <td className="px-3 py-2 font-medium text-slate-700">{CR_FIELD_LABELS[c.field] || c.field}</td>
+                        <td className="px-3 py-2 text-slate-500 line-through decoration-slate-300">{c.oldValue || '—'}</td>
+                        <td className="px-3 py-2 text-slate-800 font-medium">{c.newValue || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {cr.status === 'pending' ? (
+                <div className="mt-3 flex flex-col sm:flex-row gap-2 sm:items-start">
+                  <textarea rows={2} placeholder="Comment (required to reject)" value={crComments[cr.id] || ''} onChange={e => setCrComments(prev => ({ ...prev, [cr.id]: e.target.value }))} className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none resize-none focus:ring-2 focus:ring-blue-100" />
+                  <div className="flex gap-2">
+                    <button onClick={() => decideChangeRequest(cr, 'rejected')} disabled={crBusy === cr.id} className="px-4 py-2 text-sm font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg disabled:opacity-50">Reject</button>
+                    <button onClick={() => decideChangeRequest(cr, 'approved')} disabled={crBusy === cr.id} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg disabled:opacity-50">{crBusy === cr.id && <Loader2 size={14} className="animate-spin" />} Approve</button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-3 text-[11px] text-slate-500">{cr.status === 'approved' ? 'Approved' : 'Rejected'} by {userName(cr.reviewedBy)}{cr.reviewedAt ? ` on ${formatDateTime(cr.reviewedAt)}` : ''}{cr.reviewComments ? ` — "${cr.reviewComments}"` : ''}</p>
+              )}
+            </div>
+          ))}
         </div>
       )}
 

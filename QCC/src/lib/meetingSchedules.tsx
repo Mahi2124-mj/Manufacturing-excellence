@@ -3,10 +3,12 @@
 // PUBLISHED entries and turns them into the respective team's meetings. Team
 // details (dept, leader, members, advisor, coordinator, level) are NOT stored —
 // they are fetched live from Team Registration by teamId, so there is no
-// duplicate data entry. Persisted to localStorage + synced across tabs.
+// duplicate data entry. Saved on the server (shared by every PC), cached in localStorage.
 import {
   createContext, useContext, useState, useCallback, useMemo, useEffect, type ReactNode,
 } from 'react';
+import { sharedStore } from './sharedStore';
+import { useServerConfig } from './useServerConfig';
 
 export type ScheduleStatus = 'draft' | 'published' | 'cancelled';
 
@@ -35,7 +37,9 @@ export const WEEK_OPTIONS = ['W1', 'W2', 'W3', 'W4', 'Every'];
 export const MEETING_TYPES = ['Standup', 'Review', 'Planning', 'Retrospective', 'General'];
 const DOW_INDEX: Record<string, number> = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
 
+// The server copy (SERVER_KEY) is shared by every PC; localStorage is only a cache.
 const STORAGE_KEY = 'qcc-meeting-schedules';
+const SERVER_KEY = 'config-meeting-schedules';
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const isoOf = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -101,10 +105,17 @@ export function MeetingSchedulesProvider({ children }: { children: ReactNode }) 
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  useServerConfig(SERVER_KEY, data => {
+    if (!Array.isArray(data)) return;
+    setSchedules(data as MeetingScheduleEntry[]);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+  });
+
   const commit = useCallback((updater: (prev: MeetingScheduleEntry[]) => MeetingScheduleEntry[]) => {
     setSchedules(prev => {
       const next = updater(prev);
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      sharedStore.set(SERVER_KEY, next);
       return next;
     });
   }, []);

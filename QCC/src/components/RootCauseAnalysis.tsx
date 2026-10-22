@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Plus, Edit2, X, Check } from 'lucide-react';
 import FishboneDiagram from './FishboneDiagram';
 import { useConfirm } from './ConfirmDialog';
+import { sharedStore } from '../lib/sharedStore';
 
 type Category = 'Man' | 'Machine' | 'Method' | 'Material' | 'Measurement' | 'Environment';
 
@@ -23,27 +24,20 @@ const CATEGORY_COLORS: Record<Category, string> = {
   Environment: '#06b6d4',
 };
 
-const INITIAL_CAUSES: Cause[] = [
-  { id: '1', category: 'Man', text: 'Operator skill gap', createdAt: '2024-03-15' },
-  { id: '3', category: 'Machine', text: 'Nozzle blockage', createdAt: '2024-03-15' },
-  { id: '5', category: 'Method', text: 'No standard setting procedure', createdAt: '2024-03-15' },
-  { id: '7', category: 'Material', text: 'Solder paste viscosity variation', createdAt: '2024-03-15' },
-  { id: '9', category: 'Measurement', text: 'Gauge not calibrated', createdAt: '2024-03-15' },
-  { id: '11', category: 'Environment', text: 'Temperature variation', createdAt: '2024-03-15' },
-];
-
-export default function RootCauseAnalysis({ projectId }: { projectId?: string }) {
-  // Persist the fishbone per project so the Final Report (Step 9) can render it.
-  const STORAGE_KEY = projectId ? `qcc-fishbone-${projectId}` : '';
-  const seed = (() => {
+export default function RootCauseAnalysis({ projectId, problemStatement: projectProblem = '' }: { projectId?: string; problemStatement?: string }) {
+  // Saved per project on the server (shared by every PC) so the Final Report (Step 9)
+  // can render it. A new project starts from its own problem statement and no causes.
+  const STORAGE_KEY = projectId ? `step-fishbone/${projectId}` : '';
+  const [seed] = useState(() => {
     if (!STORAGE_KEY) return null;
-    try { const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); return s && Array.isArray(s.causes) ? s : null; } catch { return null; }
-  })();
+    const s = sharedStore.get<{ problemStatement?: string; causes?: Cause[] }>(STORAGE_KEY);
+    return s && Array.isArray(s.causes) ? s : null;
+  });
 
-  const [problemStatement, setProblemStatement] = useState(seed?.problemStatement || 'Inconsistent solder paste application volume');
+  const [problemStatement, setProblemStatement] = useState(seed?.problemStatement ?? projectProblem);
   const [isEditingProblem, setIsEditingProblem] = useState(false);
   const [tempProblemText, setTempProblemText] = useState('');
-  const [causes, setCauses] = useState<Cause[]>(seed?.causes ?? INITIAL_CAUSES);
+  const [causes, setCauses] = useState<Cause[]>(seed?.causes ?? []);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedCategory, setSelectedCategory] = useState<Category>('Man');
   const [newCauseText, setNewCauseText] = useState('');
@@ -52,7 +46,7 @@ export default function RootCauseAnalysis({ projectId }: { projectId?: string })
   // Save the fishbone (problem + causes) so the downloaded Final Report can chart it.
   useEffect(() => {
     if (!STORAGE_KEY) return;
-    const t = setTimeout(() => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ problemStatement, causes })); } catch { /* ignore */ } }, 400);
+    const t = setTimeout(() => sharedStore.set(STORAGE_KEY, { problemStatement, causes }), 400);
     return () => clearTimeout(t);
   }, [STORAGE_KEY, problemStatement, causes]);
 
@@ -117,7 +111,7 @@ export default function RootCauseAnalysis({ projectId }: { projectId?: string })
             autoFocus
           />
         ) : (
-          <p className="text-sm text-slate-700 bg-slate-50 px-4 py-2.5 rounded-lg">{problemStatement}</p>
+          <p className="text-sm text-slate-700 bg-slate-50 px-4 py-2.5 rounded-lg">{problemStatement || <span className="text-slate-400">No problem statement yet — click the pencil to write it.</span>}</p>
         )}
       </div>
 

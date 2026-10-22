@@ -26,13 +26,31 @@ from security import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+def _find_login_user(db: Session, identifier: str):
+    """Resolve a full email, a username = the part of the email before '@'
+    (amit@qcc.com -> "amit", admin@qcc.com -> "admin"), or the user's full name
+    ("Simran Kaur", case and extra spaces ignored). A username or name shared by two
+    users matches nobody, so they must type something unique (the full email)."""
+    ident = " ".join((identifier or "").lower().split())
+    if not ident:
+        return None
+    if "@" in ident:
+        return db.query(User).filter(func.lower(User.email) == ident).first()
+    users = db.query(User).all()
+    matches = [u for u in users if u.email.lower().split("@")[0] == ident]
+    if not matches:
+        matches = [u for u in users if " ".join(u.name.lower().split()) == ident]
+    return matches[0] if len(matches) == 1 else None
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    """Verify email + password and return a signed access token with the user profile."""
-    user = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
+    """Verify username (or email) + password and return a signed access token with the
+    user profile. The body field is still called "email" for API compatibility."""
+    user = _find_login_user(db, body.email)
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password"
         )
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive")
