@@ -10,8 +10,8 @@ import { mockDepartments, DEPARTMENTS, mockSubDepartments } from '../lib/data';
 import { ROLE_LABELS, ROLE_COLORS, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { formatDateTime } from '../lib/format';
-import { useHalfYear } from '../lib/halfYear';
-import { useCycles } from '../lib/cycles';
+import { useHalfYear, halfWith } from '../lib/halfYear';
+import { useCycles, MAX_CYCLES_PER_YEAR } from '../lib/cycles';
 import { useActivitySteps } from '../lib/activitySteps';
 import { useHierarchy } from '../lib/hierarchy';
 import type { User, UserRole, SubDepartment, Team, QCCProject, TeamChangeRequest } from '../types';
@@ -266,20 +266,20 @@ export default function AdminPanel() {
   };
 
   // Create a QCC cycle → it saves, becomes active, and its year appears in the header period dropdown.
-  // Teams are grouped by the cycle's YEAR, so a brand-new cycle must be a new year — that is
-  // what makes it open EMPTY (a fresh slate) instead of inheriting the previous year's teams.
+  // A QCC year runs two cycles (one per half), so a year takes at most two.
   const handleCreateCycle = () => {
     const year = parseInt((cycleForm.startDate || '').slice(0, 4), 10);
     if (!cycleForm.name.trim() || !cycleForm.startDate || !Number.isFinite(year)) {
       setCycleMsg('Enter cycle name and valid date'); setTimeout(() => setCycleMsg(null), 3500); return;
     }
-    if (cycles.some(c => c.year === year)) {
-      setCycleMsg(`Cycle for ${year} already exists`);
+    if (cycles.filter(c => c.year === year).length >= MAX_CYCLES_PER_YEAR) {
+      setCycleMsg(`${year} already has ${MAX_CYCLES_PER_YEAR} cycles`);
       setTimeout(() => setCycleMsg(null), 7000); return;
     }
     const created = createCycle({ name: cycleForm.name, startDate: cycleForm.startDate, endDate: cycleForm.endDate, maxTeams: Number(cycleForm.maxTeams) || 20 });
     if (!created) { setCycleMsg('Enter cycle name and start date'); setTimeout(() => setCycleMsg(null), 3000); return; }
-    hy.setActive({ year: created.year, half: 'H1' }); // switch the app to the new (empty) cycle's period
+    // Switch the app to the new cycle's period (the half its start date falls in).
+    hy.setActive({ year: created.year, half: halfWith(hy.ranges, created.startDate) });
     setCycleForm({ name: '', startDate: '', endDate: '', maxTeams: '' });
     setCycleMsg(null);
     setShowCycleForm(false);
@@ -759,7 +759,7 @@ export default function AdminPanel() {
                 <Calendar size={13} className="text-blue-500 mt-0.5 flex-shrink-0" />
                 {cycleForm.startDate
                   ? <span>This creates the <b className="text-slate-700">{(cycleForm.startDate || '').slice(0, 4)}</b> cycle. It opens <b>empty</b> — register or import teams into it. Teams are grouped by year, so old years' teams never carry over.</span>
-                  : <span>Pick a start date — its <b>year</b> identifies the cycle. Each new year starts fresh with no old teams; the same year shares its teams.</span>}
+                  : <span>Pick a start date — its <b>year</b> identifies the cycle. A year has up to {MAX_CYCLES_PER_YEAR} cycles (one per half); each new year starts fresh with no old teams.</span>}
               </p>
               {cycleMsg && <p className="text-xs text-red-600 mt-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{cycleMsg}</p>}
               <div className="flex justify-end gap-2 mt-4">

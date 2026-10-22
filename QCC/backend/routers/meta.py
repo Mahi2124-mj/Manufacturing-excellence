@@ -11,6 +11,8 @@ from schemas import DepartmentOut, SubDepartmentOut, CycleOut, CycleCreate, Cycl
 
 router = APIRouter(prefix="/api", tags=["meta"])
 
+MAX_CYCLES_PER_YEAR = 2   # a QCC year has two cycles (H1 and H2)
+
 
 @router.get("/departments", response_model=list[DepartmentOut])
 def list_departments(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
@@ -50,10 +52,10 @@ def create_cycle(body: CycleCreate, db: Session = Depends(get_db), _: User = Dep
     if not body.name.strip() or year is None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Cycle name and a valid start date are required")
-    # Teams are grouped by year — a new cycle must be a new year, so one cycle per year.
-    if db.query(Cycle).filter(Cycle.year == year).first():
+    # A QCC year runs two cycles (one per half), so at most two cycles per year.
+    if db.query(Cycle).filter(Cycle.year == year).count() >= MAX_CYCLES_PER_YEAR:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=f"A QCC cycle for {year} already exists")
+                            detail=f"{year} already has {MAX_CYCLES_PER_YEAR} QCC cycles")
     cid = body.id or f"cyc-{int(time.time() * 1000)}"
     cycle = Cycle(
         id=cid, name=body.name.strip(), year=year,

@@ -15,6 +15,7 @@ import type { QCCCycleConfig } from '../types';
 import { api } from './api';
 
 const STORAGE_KEY = 'qcc-cycles';
+export const MAX_CYCLES_PER_YEAR = 2;   // a QCC year has two cycles (H1 and H2)
 
 // Fallback used only before the backend responds (or if it is unreachable). The
 // real list always comes from the DB — see the mount effect below.
@@ -65,8 +66,8 @@ export function CyclesProvider({ children }: { children: ReactNode }) {
   const createCycle = useCallback((data: { name: string; startDate: string; endDate: string; maxTeams: number }): QCCCycleConfig | null => {
     const year = parseInt((data.startDate || '').slice(0, 4), 10);
     if (!data.name.trim() || !data.startDate || !Number.isFinite(year)) return null;
-    // Teams are grouped by year, so there is exactly one cycle per year.
-    if (cycles.some(c => c.year === year)) return null;
+    // A QCC year runs two cycles (one per half), so at most two per year.
+    if (cycles.filter(c => c.year === year).length >= MAX_CYCLES_PER_YEAR) return null;
     const tempId = `cyc-${Date.now()}`;
     const entry: QCCCycleConfig = {
       id: tempId, name: data.name.trim(), year,
