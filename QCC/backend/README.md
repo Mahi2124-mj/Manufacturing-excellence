@@ -84,6 +84,12 @@ Advisor approvals inside countermeasure / standardization / closure sheets, and 
 records of other teams, are checked field by field. Uploaded files live in `UPLOAD_DIR`
 (default `backend/uploads`) — back that folder up together with the database.
 
+## Copying data to another server
+`python data_sync.py export` writes this database to `../db_backups/qcc_data_<date>/`;
+`python data_sync.py import <folder> [--apply] [--update]` adds it to another server's
+database without deleting anything there (dry run unless `--apply`). The export holds
+password hashes — move it privately, never commit it. See `../LOCAL_DATA_SNAPSHOT.md`.
+
 ## Security notes
 - Passwords are salted pbkdf2-sha256 (240k iterations). Never stored in plaintext.
 - Tokens carry a `pv` stamp derived from the password hash. Changing or resetting a
