@@ -1,6 +1,7 @@
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import type { User, UserRole } from '../types';
 import { api, ApiError, getToken, getStoredUser, setSession, clearSession, setUnauthorizedHandler } from './api';
+import { sharedStore } from './sharedStore';
 
 interface AuthContextType {
   user: User | null;
@@ -17,13 +18,6 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
-
-// Convenience: let users sign in with a short username instead of the full email.
-// The typed password is still verified by the backend.
-const USERNAME_TO_EMAIL: Record<string, string> = {
-  admin: 'admin@qcc.com',
-  leader: 'priya@qcc.com',
-};
 
 // How often to re-check with the server that this session is still valid. A password
 // change revokes tokens server-side; without this poll an idle tab would keep showing
@@ -68,6 +62,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => setUnauthorizedHandler(null);
   }, []);
 
+  // Shared documents are loaded with the signed-in user's permissions — start fresh
+  // whenever the user changes (sign-out, Switch User) so nobody sees the last one's copy.
+  const userId = user?.id;
+  const lastUserId = useRef(userId);
+  useEffect(() => {
+    if (lastUserId.current !== userId) { sharedStore.clear(); lastUserId.current = userId; }
+  }, [userId]);
+
   // Poll the server while signed in so a revoked session is noticed within ~30s even if
   // the tab sits idle. api.me() raising 401 triggers the handler above.
   useEffect(() => {
@@ -78,10 +80,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (identifier: string, password: string): Promise<boolean> => {
     setError(null);
-    const id = identifier.trim().toLowerCase();
-    const email = USERNAME_TO_EMAIL[id] ?? id;
+    // Username (the part of the email before "@", e.g. "amit" or "admin") or the full
+    // email — the backend resolves either one.
     try {
-      const { accessToken, user: loggedIn } = await api.login(email, password);
+      const { accessToken, user: loggedIn } = await api.login(identifier.trim(), password);
       setSession(accessToken, loggedIn);
       setToken(accessToken);
       setUser(loggedIn);

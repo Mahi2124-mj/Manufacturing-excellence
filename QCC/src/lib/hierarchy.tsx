@@ -8,9 +8,13 @@ import {
   createContext, useContext, useState, useCallback, useMemo, useEffect, type ReactNode,
 } from 'react';
 import { DEPARTMENTS, SUB_DEPARTMENTS } from './data';
+import { sharedStore } from './sharedStore';
+import { useServerConfig } from './useServerConfig';
 import type { SubDepartment } from '../types';
 
+// The server copy (SERVER_KEY) is shared by every PC; localStorage is only a cache.
 const STORAGE_KEY = 'qcc-hierarchy';
+const SERVER_KEY = 'config-hierarchy';
 
 interface HierarchyState { departments: string[]; nodes: SubDepartment[]; }
 
@@ -68,10 +72,18 @@ export function HierarchyProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  useServerConfig(SERVER_KEY, data => {
+    const p = data as HierarchyState;
+    if (!Array.isArray(p?.departments) || !Array.isArray(p?.nodes)) return;
+    setState(p);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); } catch { /* ignore */ }
+  });
+
   const commit = useCallback((updater: (prev: HierarchyState) => HierarchyState) => {
     setState(prev => {
       const next = updater(prev);
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      sharedStore.set(SERVER_KEY, next);
       return next;
     });
   }, []);

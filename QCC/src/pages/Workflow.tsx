@@ -23,8 +23,10 @@ import ResultsCheck from '../components/ResultsCheck';
 import WhyWhyAnalysis from '../components/WhyWhyAnalysis';
 import StandardizationSection from '../components/StandardizationSection';
 import LeaderCommentSection from '../components/LeaderCommentSection';
-import FinalProjectClosure, { loadClosure, type ClosureState } from '../components/FinalProjectClosure';
+import FinalProjectClosure, { loadClosure, CLOSURE_KEY, type ClosureState } from '../components/FinalProjectClosure';
 import StepDocuments from '../components/StepDocuments';
+import SharedDocs from '../components/SharedDocs';
+import { sharedStore } from '../lib/sharedStore';
 
 // Steps that get a Document Register, with the documents a company quality project
 // would typically attach at that phase (shown as guidance in the register).
@@ -34,6 +36,23 @@ const DOC_STEP_RECOMMEND: Record<string, string[]> = {
   'countermeasure': ['Countermeasure matrix', 'Trial / implementation evidence', 'Cost-benefit sheet'],
   'results':        ['Before / after comparison', 'Result data & graphs', 'Target-achievement proof'],
 };
+
+// The shared documents (server-saved data) each step's components read and write.
+const STEP_DOC_KINDS: Record<string, string[]> = {
+  theme: ['step-theme'],
+  'current-target': ['step-current-target'],
+  'activity-plan': ['step-activity-plan'],
+  'root-cause': ['step-fishbone', 'step-whywhy', 'step-rootcauses'],
+  countermeasure: ['step-countermeasure', 'step-rootcauses'],
+  results: ['step-results'],
+  standardization: ['step-standardization'],
+  benefits: ['step-benefits'],
+  closure: ['step-closure'],
+};
+const stepDocKeys = (workflowKey: string | undefined, projectId: string): string[] => [
+  ...(STEP_DOC_KINDS[workflowKey || ''] || []).map(kind => `${kind}/${projectId}`),
+  ...(workflowKey && DOC_STEP_RECOMMEND[workflowKey] ? [`step-docs/${projectId}/${workflowKey}`] : []),
+];
 
 const STATUS_CONFIG: Record<WorkflowStatus, { label: string; color: string; bg: string }> = {
   draft: { label: 'Draft', color: 'text-slate-600', bg: 'bg-slate-100' },
@@ -175,8 +194,17 @@ export default function Workflow() {
 
   const selectedProject = availableProjects.find(p => p.id === selectedProjectId) || availableProjects[0] || null;
 
-  // Load the Final Project Closure state for the selected project (drives the workflow-wide lock).
-  useEffect(() => { setClosure(selectedProject ? loadClosure(selectedProject.id) : null); }, [selectedProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Load the Final Project Closure state for the selected project (drives the workflow-wide
+  // lock) from the server, so a project closed on one PC is locked on every PC.
+  useEffect(() => {
+    if (!selectedProject) { setClosure(null); return; }
+    let cancelled = false;
+    const pid = selectedProject.id;
+    sharedStore.load([CLOSURE_KEY(pid)], { force: true })
+      .catch(() => { /* offline: whatever is loaded */ })
+      .finally(() => { if (!cancelled) setClosure(loadClosure(pid)); });
+    return () => { cancelled = true; };
+  }, [selectedProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save/submit the current step to the backend (PATCH /api/projects/{id}/steps/{n}).
   // Validation — a step can't be submitted for review while its form / table is completely empty.
@@ -314,34 +342,39 @@ export default function Workflow() {
     switch (step?.workflowKey) {
       case 'theme':
         return (
+          // Keyed by project so switching project reloads that project's own saved data
+          // instead of carrying the previous project's state across.
           <ProblemIdentification
+            key={selectedProject.id}
             projectId={selectedProject.id}
-            teamName={selectedProject.title}
-            teamMembers={teams.find(t => t.id === selectedProject.teamId)?.members.filter(m => m.isActive).map((m, idx) => ({ id: `m${idx + 1}`, name: m.memberName })) || []}
+            teamName={selectedTeam?.name || selectedProject.title}
+            teamMembers={selectedTeam?.members.filter(m => m.isActive).map((m, idx) => ({ id: `m${idx + 1}`, name: m.memberName })) || []}
           />
         );
       case 'current-target':
-        return <CurrentSituationTarget />;
+        return <CurrentSituationTarget key={selectedProject.id} projectId={selectedProject.id} />;
       case 'activity-plan':
         return (
           <ActivityPlan
+            key={selectedProject.id}
             projectId={selectedProject.id}
             projectName={selectedProject.title}
             teamId={selectedProject.teamId}
+            team={selectedTeam || null}
             userRole={user.role}
             stepStatus={currentStepInfo?.status || 'draft'}
           />
         );
       case 'root-cause':
-        return (<><RootCauseAnalysis projectId={selectedProject.id} /><WhyWhyAnalysis projectId={selectedProject.id} /></>);
+        return (<><RootCauseAnalysis key={`fb-${selectedProject.id}`} projectId={selectedProject.id} problemStatement={selectedProject.problemStatement || ''} /><WhyWhyAnalysis key={`ww-${selectedProject.id}`} projectId={selectedProject.id} /></>);
       case 'countermeasure':
-        return <CountermeasureStudy key={selectedProject.id} projectId={selectedProject.id} teamId={selectedProject.teamId} userRole={user?.role || 'member'} />;
+        return <CountermeasureStudy key={selectedProject.id} projectId={selectedProject.id} teamId={selectedProject.teamId} team={selectedTeam || null} userRole={user?.role || 'member'} />;
       case 'results':
-        return <ResultsCheck />;
+        return <ResultsCheck key={selectedProject.id} projectId={selectedProject.id} />;
       case 'standardization':
-        return <StandardizationSection userRole={user?.role || 'member'} />;
+        return <StandardizationSection key={selectedProject.id} projectId={selectedProject.id} userRole={user?.role || 'member'} />;
       case 'benefits':
-        return <OverallBenefits projectId={selectedProject.id} />;
+        return <OverallBenefits key={selectedProject.id} projectId={selectedProject.id} />;
       case 'closure':
         return (
           <FinalProjectClosure
@@ -536,17 +569,22 @@ export default function Workflow() {
           </div>
         </div>
 
-        {renderStepContent(currentStep)}
-      </div>
+        {/* The step's saved data comes from the server (shared by every PC). */}
+        <SharedDocs key={`${selectedProject.id}-${currentStep?.id}`} keys={stepDocKeys(currentStep?.workflowKey, selectedProject.id)}>
+          {renderStepContent(currentStep)}
 
-      {/* Document Register (upload PDF / image / Excel / PPT / Word) — steps 2, 4, 5, 6 */}
-      {currentStep?.workflowKey && DOC_STEP_RECOMMEND[currentStep.workflowKey] && (
-        <StepDocuments
-          storageKey={`stepdocs-${selectedProject.id}-${currentStep.workflowKey}`}
-          recommended={DOC_STEP_RECOMMEND[currentStep.workflowKey]}
-          disabled={closureLocked && activeStep !== closureIndex}
-        />
-      )}
+          {/* Document Register (upload PDF / image / Excel / PPT / Word) — steps 2, 4, 5, 6 */}
+          {currentStep?.workflowKey && DOC_STEP_RECOMMEND[currentStep.workflowKey] && (
+            <div className="mt-6">
+              <StepDocuments
+                storageKey={`step-docs/${selectedProject.id}/${currentStep.workflowKey}`}
+                recommended={DOC_STEP_RECOMMEND[currentStep.workflowKey]}
+                disabled={closureLocked && activeStep !== closureIndex}
+              />
+            </div>
+          )}
+        </SharedDocs>
+      </div>
 
       {/* Step submit footer — on every step */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">

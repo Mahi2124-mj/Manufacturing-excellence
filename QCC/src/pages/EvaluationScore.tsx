@@ -4,6 +4,8 @@ import { formatDate, formatTime } from '../lib/format';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useHalfYear } from '../lib/halfYear';
 import { api } from '../lib/api';
+import { sharedStore } from '../lib/sharedStore';
+import SharedDocs from '../components/SharedDocs';
 import type { Team as RegTeam } from '../types';
 import {
   Trophy, Printer, RotateCcw, Plus, Trash2, Users, Award, Settings,
@@ -89,13 +91,21 @@ const CAT_COLORS = [
   { badge: 'bg-cyan-100 text-cyan-700', pill: 'bg-cyan-50 text-cyan-700', solid: 'bg-cyan-600' },
 ];
 
+// The evaluation is saved on the server (shared by every PC): setup, scores, remarks,
+// judge submissions and team levels. Admin / Dept Head / Facilitator may change it.
+const EVAL_KEYS = ['eval-setup', 'eval-scores', 'eval-remarks', 'eval-submitted', 'eval-team-levels'];
+
 export default function EvaluationScore() {
+  return <SharedDocs keys={EVAL_KEYS}><EvaluationScorePage /></SharedDocs>;
+}
+
+function EvaluationScorePage() {
   const navigate = useNavigate();
   const [editingJudgeId, setEditingJudgeId] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [setup, setSetup] = useState<EvaluationSetup>(() => {
-    const saved = localStorage.getItem('qcc-judge-evaluation-setup-v2');
-    const base = saved ? JSON.parse(saved) : {
+    const saved = sharedStore.get<EvaluationSetup>('eval-setup');
+    const base = saved ? { ...saved } : {
       eventName: 'QCC Competition 2024',
       eventDate: new Date().toISOString().split('T')[0],
       lastScoringDate: '',
@@ -123,8 +133,8 @@ export default function EvaluationScore() {
   const toggleCat = (cat: string) => setExpandedCats(prev => { const n = new Set(prev); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
 
   const [scores, setScores] = useState<Score[]>(() => {
-    const saved = localStorage.getItem('qcc-judge-evaluation-scores-v2');
-    return saved ? JSON.parse(saved) : [];
+    const saved = sharedStore.get<Score[]>('eval-scores');
+    return Array.isArray(saved) ? saved : [];
   });
 
   const [view, setView] = useState<'setup' | 'scoring' | 'results'>(() => {
@@ -138,7 +148,7 @@ export default function EvaluationScore() {
   const [editValue, setEditValue] = useState('');
 
   const [remarks, setRemarks] = useState<Record<string, string>>(() => {
-    try { return JSON.parse(localStorage.getItem('qcc-judge-evaluation-remarks-v2') || '{}'); } catch { return {}; }
+    return sharedStore.get<Record<string, string>>('eval-remarks') || {};
   });
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [flashId, setFlashId] = useState<string | null>(null);
@@ -157,17 +167,17 @@ export default function EvaluationScore() {
 
   // Gemba level per team (Staff / Associate) — set in the scoring table, splits the results.
   const [teamLevels, setTeamLevels] = useState<Record<string, string>>(() => {
-    try { return JSON.parse(localStorage.getItem('qcc-eval-team-levels') || '{}'); } catch { return {}; }
+    return sharedStore.get<Record<string, string>>('eval-team-levels') || {};
   });
-  useEffect(() => { localStorage.setItem('qcc-eval-team-levels', JSON.stringify(teamLevels)); }, [teamLevels]);
+  useEffect(() => { sharedStore.set('eval-team-levels', teamLevels); }, [teamLevels]);
   const levelOf = (teamId: string) => teamLevels[teamId] || 'Staff';
   const setLevel = (teamId: string, level: string) => setTeamLevels(prev => ({ ...prev, [teamId]: level }));
 
   // Per-judge submission — each judge submits their own scoring; timestamp persisted.
   const [submittedJudges, setSubmittedJudges] = useState<Record<string, string>>(() => {
-    try { return JSON.parse(localStorage.getItem('qcc-eval-submitted-judges') || '{}'); } catch { return {}; }
+    return sharedStore.get<Record<string, string>>('eval-submitted') || {};
   });
-  useEffect(() => { localStorage.setItem('qcc-eval-submitted-judges', JSON.stringify(submittedJudges)); }, [submittedJudges]);
+  useEffect(() => { sharedStore.set('eval-submitted', submittedJudges); }, [submittedJudges]);
   const submitJudge = (judgeId: string) => setSubmittedJudges(prev => ({ ...prev, [judgeId]: new Date().toLocaleString() }));
   const unsubmitJudge = (judgeId: string) => setSubmittedJudges(prev => { const n = { ...prev }; delete n[judgeId]; return n; });
 
@@ -181,17 +191,17 @@ export default function EvaluationScore() {
   }, [flashId]);
 
   useEffect(() => {
-    localStorage.setItem('qcc-judge-evaluation-setup-v2', JSON.stringify(setup));
+    sharedStore.set('eval-setup', setup);
   }, [setup]);
 
   // Auto-save on every score change, with a short "saved" confirmation.
   useEffect(() => {
-    localStorage.setItem('qcc-judge-evaluation-scores-v2', JSON.stringify(scores));
+    sharedStore.set('eval-scores', scores);
     setSavedAt(formatTime(new Date()));
   }, [scores]);
 
   useEffect(() => {
-    localStorage.setItem('qcc-judge-evaluation-remarks-v2', JSON.stringify(remarks));
+    sharedStore.set('eval-remarks', remarks);
   }, [remarks]);
 
   /* A criterion counts as "completed" only when an entry exists — this keeps an

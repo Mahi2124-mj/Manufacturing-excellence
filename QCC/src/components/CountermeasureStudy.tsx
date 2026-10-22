@@ -3,13 +3,15 @@ import {
   Rocket, Plus, Trash2, Crown, CheckCircle2, XCircle,
   ClipboardList, AlertCircle, Lock, MessageSquare, Calendar, User, ListChecks,
 } from 'lucide-react';
-import { mockTeams } from '../lib/data';
 import { useConfirm } from './ConfirmDialog';
+import { sharedStore } from '../lib/sharedStore';
+import type { Team } from '../types';
 
 /* ───────── Types ───────── */
 interface CountermeasureStudyProps {
   projectId: string;
   teamId: string;
+  team?: Team | null;   // the project's team as registered (task owners come from it)
   userRole: string;
 }
 
@@ -96,18 +98,16 @@ const STATUS_BADGE: Record<string, { label: string; cls: string; dot: string }> 
 };
 
 /* ───────── Component ───────── */
-export default function CountermeasureStudy({ projectId, teamId, userRole }: CountermeasureStudyProps) {
-  // v2 key: this sheet holds ONLY the selected project's root causes (no generic defaults).
-  const storageKey = `qcc-countermeasure-v2-${projectId}`;
+export default function CountermeasureStudy({ projectId, team, userRole }: CountermeasureStudyProps) {
+  // This sheet holds ONLY the selected project's root causes (no generic defaults).
+  // Saved per project on the server (shared by every PC); loaded before this step mounts.
+  const storageKey = `step-countermeasure/${projectId}`;
   const canApprove = ADVISOR_ROLES.includes(userRole);
   const askConfirm = useConfirm();
 
   const [rootCauses, setRootCauses] = useState<RootCauseItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(storageKey);
-      if (saved) return JSON.parse(saved);
-    } catch { /* start empty */ }
-    return [];
+    const saved = sharedStore.get<RootCauseItem[]>(storageKey);
+    return Array.isArray(saved) ? saved : [];
   });
   // The root cause the cursor is currently in — new countermeasures go here, and its
   // approval / implementation panel is the one shown below the table.
@@ -117,9 +117,7 @@ export default function CountermeasureStudy({ projectId, teamId, userRole }: Cou
   // ── Root causes come from Step 4 (Why-Why) for THIS project ──
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(`qcc-step4-rootcauses-${projectId}`);
-      if (!raw) return;
-      const imported: string[] = JSON.parse(raw);
+      const imported = sharedStore.get<string[]>(`step-rootcauses/${projectId}`);
       if (!Array.isArray(imported) || !imported.length) return;
       setRootCauses(prev => {
         const seen = new Set(prev.map(r => r.text.trim().toLowerCase()));
@@ -134,7 +132,7 @@ export default function CountermeasureStudy({ projectId, teamId, userRole }: Cou
 
   useEffect(() => {
     const t = setTimeout(() => {
-      localStorage.setItem(storageKey, JSON.stringify(rootCauses));
+      sharedStore.set(storageKey, rootCauses);
       setSavedAt(new Date().toLocaleTimeString());
     }, 600);
     return () => clearTimeout(t);
@@ -146,12 +144,11 @@ export default function CountermeasureStudy({ projectId, teamId, userRole }: Cou
   }, [rootCauses, activeRcId]);
 
   const teamMembers = useMemo(() => {
-    const team = mockTeams.find(t => t.id === teamId);
     if (!team) return [];
     const names = [team.leaderName, team.facilitatorName, team.coordinatorName].filter(Boolean) as string[];
     team.members.filter(m => m.isActive).forEach(m => names.push(m.memberName));
     return [...new Set(names)];
-  }, [teamId]);
+  }, [team]);
 
   /* ── Mutations ── */
   const patchRc = (id: string, patch: Partial<RootCauseItem>) =>

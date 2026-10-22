@@ -26,6 +26,9 @@ python -m uvicorn main:app --reload --port 8000   # run the API
 
 ## Auth
 - `POST /api/auth/login` — body `{ "email", "password" }` → `{ accessToken, tokenType, user }`.
+  The `email` field also accepts a username = the part of the email before `@`
+  (`amit@qcc.com` → `amit`, `admin@qcc.com` → `admin`), or the user's full name when no
+  other user has the same name. Usernames are kept unique on user creation.
 - Send the token on every other request: `Authorization: Bearer <accessToken>`.
 - All seeded users share the password **`demo123`** (e.g. `admin@qcc.com`, `priya@qcc.com`).
 
@@ -40,12 +43,15 @@ python -m uvicorn main:app --reload --port 8000   # run the API
 | POST | `/api/auth/verify-reset-code` | Code → short-lived reset token |
 | POST | `/api/auth/reset-password` | Reset token + new password → signed in |
 | GET  | `/api/users` | List users |
-| POST | `/api/users` | **admin only** — create user |
+| POST | `/api/users` | **admin only** — create user (admin sets the first password) |
+| PATCH | `/api/users/{id}` | **admin only** — change role / activate / deactivate |
+| POST | `/api/users/{id}/password` | **admin only** — reset another user's password (signs them out) |
 | GET  | `/api/teams` | Leaders see only their own teams |
 | GET  | `/api/teams/{id}` | Team detail (with members) |
 | POST | `/api/teams` | admin/leader/facilitator |
 | PATCH | `/api/teams/{id}` | admin applies directly; others create a change request |
-| POST | `/api/teams/change-requests/{id}/decision` | **admin/dept_head** approve/reject |
+| GET  | `/api/teams/change-requests` | Admin: all requests; others: their own (`?status=pending` to filter) |
+| POST | `/api/teams/change-requests/{id}/decision` | **admin only** — approve (applies the edit) / reject (reason required) |
 | GET  | `/api/projects` | List projects (with 7 workflow steps) |
 | GET  | `/api/projects/{id}` | Project detail |
 | GET  | `/api/projects/{id}/steps` | Workflow steps |
@@ -60,6 +66,23 @@ python -m uvicorn main:app --reload --port 8000   # run the API
 | GET  | `/api/cycles` | QCC cycles |
 | GET  | `/api/dashboard/stats` | Real aggregates (teams/projects/savings/overdue/pending) |
 | GET  | `/api/meetings` | Meeting minutes |
+| GET  | `/api/docs?keys=a,b` | Shared documents (step sheets, meeting records, evaluation, assessment, admin config) the caller may read |
+| GET  | `/api/docs/kind/{kind}` | Every readable document of one kind (e.g. all `step-benefits` for the Dashboard) |
+| PUT  | `/api/docs` | Save one document; `base_version` must match or the answer is 409 (changed on another PC) |
+| POST | `/api/files` | Upload a step document (multipart `scope` = `step-docs/<project>/<step>`, `file`; max 25 MB) |
+| GET/DELETE | `/api/files/{id}` | Download / remove a step document (project access / project editors) |
+
+## Shared documents
+Content that used to live in each browser's localStorage is stored in `shared_docs`, so
+every PC sees the same data. A key is `<kind>/<ref>`:
+- project kinds (`step-theme/PRJ-001`, … `step-closure/PRJ-001`, `step-docs/PRJ-001/root-cause`):
+  read with project access, written by that team's editors;
+- team kinds (`team-assessment/QCC-MFG-001`): read with team access, written by team editors;
+- global kinds (`config-hierarchy`, `eval-scores`, `meetings-exec`, …): read by anyone signed
+  in, written by the roles listed in `routers/docs.py` (`GLOBAL_KINDS`).
+Advisor approvals inside countermeasure / standardization / closure sheets, and meeting
+records of other teams, are checked field by field. Uploaded files live in `UPLOAD_DIR`
+(default `backend/uploads`) — back that folder up together with the database.
 
 ## Security notes
 - Passwords are salted pbkdf2-sha256 (240k iterations). Never stored in plaintext.

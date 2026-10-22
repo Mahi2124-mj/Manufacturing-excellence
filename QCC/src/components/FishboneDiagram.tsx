@@ -113,7 +113,7 @@ const branchXAtY = (br: number, spineY: number, tipY: number, y: number) =>
 
 // ─── Component ───────────────────────────────────────────
 export default function FishboneDiagram({ causes, problemStatement, onEditCause, onDeleteCause, onToggleSelect }: FishboneDiagramProps) {
-  const effectText = problemStatement || 'Inconsistent solder paste application volume';
+  const effectText = problemStatement || 'Problem statement';
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
 

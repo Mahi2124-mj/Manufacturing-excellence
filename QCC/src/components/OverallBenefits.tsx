@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { Coins, Sparkles, Award, TrendingUp, TrendingDown, CheckCircle2, Plus, Trash2, Wallet, Gauge } from 'lucide-react';
 import { useConfirm } from './ConfirmDialog';
+import { sharedStore } from '../lib/sharedStore';
 
 /* ───────── Types ───────── */
 interface TangibleRow {
@@ -91,20 +92,16 @@ const computeYearly = (b: { before: string; after: string; frequency: string }) 
 
 /* ───────── Component ───────── */
 export default function OverallBenefits({ projectId = 'default' }: OverallBenefitsProps) {
-  const storageKey = `qcc-overall-benefits-v2-${projectId}`;
+  // Saved per project on the server (shared by every PC); loaded before this step mounts.
+  const storageKey = `step-benefits/${projectId}`;
   const askConfirm = useConfirm();
+  const [saved] = useState(() => sharedStore.get<{ tangible?: TangibleRow[]; intangible?: IntangibleRow[] }>(storageKey));
 
-  const [tangible, setTangible] = useState<TangibleRow[]>(() => {
-    try { const s = localStorage.getItem(storageKey); if (s) return mergeTangible(JSON.parse(s).tangible); } catch { /* template */ }
-    return freshTangible();
-  });
-  const [intangible, setIntangible] = useState<IntangibleRow[]>(() => {
-    try { const s = localStorage.getItem(storageKey); if (s) return mergeIntangible(JSON.parse(s).intangible); } catch { /* template */ }
-    return freshIntangible();
-  });
+  const [tangible, setTangible] = useState<TangibleRow[]>(() => (saved?.tangible ? mergeTangible(saved.tangible) : freshTangible()));
+  const [intangible, setIntangible] = useState<IntangibleRow[]>(() => (saved?.intangible ? mergeIntangible(saved.intangible) : freshIntangible()));
 
   useEffect(() => {
-    const t = setTimeout(() => localStorage.setItem(storageKey, JSON.stringify({ tangible, intangible })), 600);
+    const t = setTimeout(() => sharedStore.set(storageKey, { tangible, intangible }), 600);
     return () => clearTimeout(t);
   }, [tangible, intangible, storageKey]);
 

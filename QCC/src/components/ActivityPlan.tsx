@@ -7,9 +7,10 @@ import {
   FileSpreadsheet, Eye, ChevronRight, Info, Plus, Trash2, RotateCcw,
   Lock, Unlock
 } from 'lucide-react';
-import { mockActivitySteps, mockUsers, mockTeams } from '../lib/data';
 import { useAuth } from '../lib/auth';
-import type { ActivityPlanEntry, ActivityPlanConfig } from '../types';
+import { useActivitySteps } from '../lib/activitySteps';
+import { sharedStore } from '../lib/sharedStore';
+import type { ActivityPlanEntry, ActivityPlanConfig, ActivityStep, Team } from '../types';
 // The timeline is now rendered inline (merged with the table into one scroll area);
 // only the shared types are still needed from the standalone Gantt component.
 import { type GanttActivity, type GanttViewMode } from './GanttChart';
@@ -99,26 +100,26 @@ interface ActivityPlanProps {
   projectId: string;
   projectName: string;
   teamId: string;
+  team?: Team | null;   // the project's team as registered (PIC list comes from it)
   userRole: string;
   stepStatus: string;
 }
 
 // ─── Component ───────────────────────────────────────────
-export default function ActivityPlan({ projectId, projectName, teamId, userRole, stepStatus }: ActivityPlanProps) {
+export default function ActivityPlan({ projectId, projectName, team, userRole, stepStatus }: ActivityPlanProps) {
   const { user } = useAuth();
   const userId = user?.id || 'unknown';
+  // Plan rows follow the workflow steps configured in Admin → Activity Steps.
+  const { steps: configuredSteps } = useActivitySteps();
 
   // ── State ──
+  // Saved per project on the server (shared by every PC); loaded before this step mounts.
+  const storageKey = `step-activity-plan/${projectId}`;
   const [entries, setEntries] = useState<ActivityPlanEntry[]>(() => {
-    const saved = localStorage.getItem(`gantt-${projectId}`);
-    if (saved) {
-      try {
-        const parsed: ActivityPlanEntry[] = JSON.parse(saved);
-        // Legacy rows that already carry an actualEnd count as approved.
-        return parsed.map(e => ({ ...e, isApproved: e.isApproved ?? !!e.actualEnd }));
-      } catch { /* fall through to defaults */ }
-    }
-    return generateDefaultEntries(projectId, teamId);
+    const saved = sharedStore.get<ActivityPlanEntry[]>(storageKey);
+    // Legacy rows that already carry an actualEnd count as approved.
+    if (Array.isArray(saved)) return saved.map(e => ({ ...e, isApproved: e.isApproved ?? !!e.actualEnd }));
+    return generateDefaultEntries(projectId, team, configuredSteps.filter(s => s.isActive));
   });
 
   const [config, setConfig] = useState<ActivityPlanConfig>({
@@ -143,8 +144,8 @@ export default function ActivityPlan({ projectId, projectName, teamId, userRole,
 
   // ── Activity Steps ──
   const activitySteps = useMemo(() => {
-    const configured = mockActivitySteps?.filter(s => s.isActive).sort((a, b) => a.order - b.order);
-    if (configured && configured.length > 0) return configured;
+    const configured = [...configuredSteps].sort((a, b) => a.order - b.order);
+    if (configured.length > 0) return configured;
     return DEFAULT_ACTIVITIES.map((a, i) => ({
       id: `step-${i + 1}`,
       order: i + 1,
@@ -155,26 +156,29 @@ export default function ActivityPlan({ projectId, projectName, teamId, userRole,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }));
-  }, []);
+  }, [configuredSteps]);
 
-  // ── Team Members ──
+  // ── Team Members (from the team as registered; one entry per distinct name) ──
   const teamMembers = useMemo(() => {
-    const team = mockTeams.find(t => t.id === teamId);
     if (!team) return [];
-    const members = [{ name: team.leaderName, role: 'Leader' }];
-    if (team.facilitatorName) members.push({ name: team.facilitatorName, role: 'Facilitator' });
-    if (team.coordinatorName) members.push({ name: team.coordinatorName, role: 'Coordinator' });
-    team.members.filter(m => m.isActive).forEach(m => members.push({ name: m.memberName, role: 'Member' }));
+    const members: { name: string; role: string }[] = [];
+    const add = (name: string | undefined, role: string) => {
+      if (name?.trim() && !members.some(m => m.name === name)) members.push({ name, role });
+    };
+    add(team.leaderName, 'Leader');
+    add(team.facilitatorName, 'Facilitator');
+    add(team.coordinatorName, 'Coordinator');
+    team.members.filter(m => m.isActive).forEach(m => add(m.memberName, 'Member'));
     return members;
-  }, [teamId]);
+  }, [team]);
 
   // ── Auto-save to localStorage ──
   useEffect(() => {
     const timer = setTimeout(() => {
-      localStorage.setItem(`gantt-${projectId}`, JSON.stringify(entries));
+      sharedStore.set(storageKey, entries);
     }, 1000);
     return () => clearTimeout(timer);
-  }, [entries, projectId]);
+  }, [entries, storageKey]);
 
   // ── Delay detection ──
   // Same rule as the standalone Activity Plan page: a delay only exists once management
@@ -852,52 +856,38 @@ export default function ActivityPlan({ projectId, projectName, teamId, userRole,
 }
 
 // ─── Generate Default Entries ────────────────────────────
-function generateDefaultEntries(projectId: string, teamId: string): ActivityPlanEntry[] {
-  const team = mockTeams.find(t => t.id === teamId);
-  const leaderName = team?.leaderName || '';
-  const members = team?.members.filter(m => m.isActive).map(m => m.memberName) || [];
-  const allPICs = [leaderName, ...members];
+// A new project's plan starts with one row per configured workflow step and a suggested
+// two-week slot each. Actual dates start EMPTY — they are only ever entered by the team,
+// never invented, because they feed the delay figures and the final report.
+function generateDefaultEntries(projectId: string, team: Team | null | undefined, steps: ActivityStep[]): ActivityPlanEntry[] {
+  const allPICs = [team?.leaderName || '', ...(team?.members.filter(m => m.isActive).map(m => m.memberName) || [])].filter(Boolean);
+  const rows = steps.length
+    ? [...steps].sort((a, b) => a.order - b.order).map(s => ({ stepId: s.id, name: s.name }))
+    : DEFAULT_ACTIVITIES.map((a, i) => ({ stepId: `step-${i + 1}`, name: a.name }));
 
+  // Suggested slots start today, so no row is "Delayed" the moment the plan is created.
   const today = new Date();
-  const baseStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const baseStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-  return DEFAULT_ACTIVITIES.map((act, i) => {
+  return rows.map((row, i) => {
     const plannedStart = new Date(baseStart);
     plannedStart.setDate(plannedStart.getDate() + i * 14);
     const plannedEnd = new Date(plannedStart);
     plannedEnd.setDate(plannedEnd.getDate() + 13);
-
-    // Simulate some actual dates for earlier activities
-    let actualStart = '';
-    let actualEnd = '';
-    let status: 'not_started' | 'planning' | 'in_progress' | 'hold' | 'delayed' | 'completed' = 'not_started';
-
-    if (i < 2) {
-      actualStart = formatDateStr(plannedStart);
-      actualEnd = formatDateStr(new Date(plannedEnd.getTime() + (i === 0 ? 0 : 2 * 86400000)));
-      status = 'completed';
-    } else if (i === 2) {
-      actualStart = formatDateStr(plannedStart);
-      status = 'in_progress';
-    } else if (i === 3) {
-      status = 'planning';
-    }
+    const plan = { plannedStart: formatDateStr(plannedStart), plannedEnd: formatDateStr(plannedEnd) };
 
     return {
       id: `entry-${projectId}-${i + 1}`,
       projectId,
-      activityStepId: `step-${i + 1}`,
-      activityName: act.name,
-      pic: allPICs[i % allPICs.length] || '',
-      plannedStart: formatDateStr(plannedStart),
-      plannedEnd: formatDateStr(plannedEnd),
-      actualStart,
-      actualEnd,
-      status,
+      activityStepId: row.stepId,
+      activityName: row.name,
+      pic: allPICs.length ? allPICs[i % allPICs.length] : '',
+      ...plan,
+      actualStart: '',
+      actualEnd: '',
+      status: autoStatus(plan),
       remarks: '',
-      // A finished (Actual End stamped) activity counts as approved, so the next one
-      // in the sequence unlocks — matching the loader's legacy rule.
-      isApproved: !!actualEnd,
+      isApproved: false,
       createdBy: 'system',
       createdAt: new Date().toISOString(),
     };

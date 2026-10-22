@@ -14,19 +14,10 @@ from models import (
     User, Department, SubDepartment, Team, TeamMember, Project, WorkflowStep,
     ActionItem, Approval, Meeting, Cycle,
 )
+from routers.projects import WORKFLOW_STEP_TITLES as STEP_TITLES
 from security import hash_password
 
 DEFAULT_PASSWORD = "demo123"
-
-STEP_TITLES = [
-    "Theme Selection",
-    "Grasp the Current Situation and Set a Target",
-    "Create an Activity Plan",
-    "Root Cause Analysis",
-    "Countermeasure Study and Implementation",
-    "Check the Results",
-    "Standardization & Establish Control",
-]
 
 USERS = [
     ("u1", "Rajesh Kumar", "admin@qcc.com", "admin", "IT", "2024-01-15"),

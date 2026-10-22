@@ -3,8 +3,7 @@ import {
   Clock, CheckCircle2, XCircle, RotateCcw, Lock, GanttChartSquare, List, LayoutGrid,
   Filter, Search, RefreshCw, ExternalLink, FileText, MessageSquare, Paperclip, UserCheck, X,
 } from 'lucide-react';
-import { mockProjects, mockUsers } from '../lib/data';
-import type { ApprovalRequest, QCCProject, Team, WorkflowStatus } from '../types';
+import type { ApprovalRequest, QCCProject, Team, User, WorkflowStatus } from '../types';
 import { useAuth, ROLE_LABELS } from '../lib/auth';
 import { useHalfYear } from '../lib/halfYear';
 import { useActivitySteps } from '../lib/activitySteps';
@@ -74,22 +73,25 @@ export default function Approvals() {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [projects, setProjects] = useState<QCCProject[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [approvalsError, setApprovalsError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const reload = () => {
-    setLoading(true);
+    setLoading(true); setApprovalsError(null);
     api.listApprovals().then(setApprovals).catch(e => setApprovalsError(e instanceof ApiError ? e.message : 'Failed to load approvals')).finally(() => setLoading(false));
     api.listProjects().then(setProjects).catch(() => { /* ignore */ });
     api.listTeams().then(setTeams).catch(() => { /* ignore */ });
+    api.listUsers().then(setUsers).catch(() => { /* ignore */ });
   };
   useEffect(() => { reload(); }, []);
   useEffect(() => { hy.registerDates(projects.map(p => p.startedAt)); }, [projects]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const getProjectTitle = (id: string) => projects.find(p => p.id === id)?.title || mockProjects.find(p => p.id === id)?.title || id;
-  const getUserName = (id: string) => mockUsers.find(u => u.id === id)?.name || id;
-  const getUserRole = (id: string) => { const r = mockUsers.find(u => u.id === id)?.role; return r ? ROLE_LABELS[r] : 'Member'; };
+  // Names, roles and titles come from the live users / projects lists.
+  const getProjectTitle = (id: string) => projects.find(p => p.id === id)?.title || id;
+  const getUserName = (id: string) => users.find(u => u.id === id)?.name || id;
+  const getUserRole = (id: string) => { const r = users.find(u => u.id === id)?.role; return r ? ROLE_LABELS[r] : '—'; };
 
   const priorApproved = (projectId: string, stepNumber: number): boolean => {
     if (stepNumber <= 1) return true;
@@ -102,7 +104,10 @@ export default function Approvals() {
     setDeciding(id); setApprovalsError(null);
     try {
       await api.decideApproval(id, status, comment || undefined);
-      setApprovals(await api.listApprovals());
+      // The decision changes the step's status too, so refresh projects as well — the
+      // "approve earlier steps first" lock and the Activity Plan matrix read them.
+      const [a, p] = await Promise.all([api.listApprovals(), api.listProjects()]);
+      setApprovals(a); setProjects(p);
       setSelectedId(null); setComment('');
     } catch (err) {
       setApprovalsError(err instanceof ApiError ? err.message : 'Failed to submit decision');
@@ -154,7 +159,7 @@ export default function Approvals() {
       if (fTo && r.reqDate > fTo) return false;
       return true;
     }).sort((x, y) => sort === 'newest' ? y.reqDate.localeCompare(x.reqDate) : x.reqDate.localeCompare(y.reqDate));
-  }, [scoped, tab, q, fStep, fTeam, fUser, fPriority, fFrom, fTo, sort, projects, teams, workflowSteps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scoped, tab, q, fStep, fTeam, fUser, fPriority, fFrom, fTo, sort, projects, teams, users, workflowSteps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Filter dropdown option lists (from the data in scope).
   const stepOptions = workflowSteps.map(s => s.title);

@@ -29,7 +29,8 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=_connect_a
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+# Where uploaded step documents are kept (override with UPLOAD_DIR in .env).
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR") or os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 

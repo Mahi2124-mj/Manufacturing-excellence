@@ -55,6 +55,10 @@ const genTeamId = (dept: string, existingTeams: Team[]) => {
   return `QCC-${prefix}-${String(count).padStart(3, '0')}`;
 };
 
+// team_members.member_id is a global primary key, so it must never repeat across
+// teams (the old 3-digit millisecond suffix collided and failed with a 500).
+const newMemberId = (i: number) => `TM-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}-${i + 1}`;
+
 const emptyMember = (): MemberRow => ({
   key: genId(), memberName: '', employeeId: '', department: '', deptEdited: false,
   isActive: true, deactivationReason: '', deactivatedAt: '',
@@ -99,6 +103,10 @@ export default function TeamRegistration() {
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<Toast>({ show: false, message: '', type: 'success' });
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
+  // Non-admin edits go to the Admin as change requests: the reason travels with them,
+  // and teams with a request still waiting get a "Change pending" badge.
+  const [changeReason, setChangeReason] = useState('');
+  const [pendingTeamIds, setPendingTeamIds] = useState<Set<string>>(new Set());
   const [showSearchLeader, setShowSearchLeader] = useState(false);
   const [showSearchFacilitator, setShowSearchFacilitator] = useState(false);
   const [showSearchCoordinator, setShowSearchCoordinator] = useState(false);
@@ -130,6 +138,25 @@ export default function TeamRegistration() {
           : teamFilter === 'incomplete' ? isIncomplete(t)
             : true);
 
+  // Registration date sent to the server. A team's QCC period is derived from this
+  // date on every device; the hy.setTeamHalf pin only lives in this browser. Using
+  // plain "today" put a team registered under H1 into H2 (or another year) for
+  // everyone else, so it vanished from their lists. Today if it falls inside the
+  // selected period, otherwise the period's first day.
+  const periodCreatedAt = (): string => {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return hy.isActive(today) ? today : `${hy.active.year}-${hy.ranges[hy.active.half].start}`;
+  };
+  // Non-admins only see teams they are named on (backend scopes by name; the leader
+  // list narrows further to their own teams), so a team registered for someone else
+  // is saved but hidden from them — tell the user instead of looking like a failure.
+  const hiddenFromMe = (leader: string, names: string[]): boolean => {
+    if (!user || isAdmin) return false;
+    const me = user.name.trim();
+    return isLeader ? leader.trim() !== me : !names.some(n => n.trim() === me);
+  };
+
   const getSubDepartmentsForDept = (dept: string) => subDepartments.filter(sd => sd.parentId === dept && sd.level === 'sub_department' && sd.isActive);
   const getLinesForSubDept = (subDeptId: string) => subDepartments.filter(sd => sd.parentId === subDeptId && sd.level === 'line' && sd.isActive);
 
@@ -141,6 +168,7 @@ export default function TeamRegistration() {
   // Load teams from the backend so newly-registered teams persist and appear here.
   const reloadTeams = useCallback(async () => {
     try { setTeams(await api.listTeams()); } catch { /* keep current list on failure */ }
+    try { setPendingTeamIds(new Set((await api.listChangeRequests('pending')).map(cr => cr.teamId))); } catch { /* badge only */ }
   }, []);
 
   useEffect(() => { reloadTeams(); }, [reloadTeams]);
@@ -157,7 +185,6 @@ export default function TeamRegistration() {
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
   }, [teamName, department, subDepartment, selectedLine, leaderName, facilitatorName, coordinatorName, projectTheme, members, view]);
 
-  useEffect(() => { setSubDepartment(''); setSelectedLine(''); }, [department]);
   useEffect(() => { setSelectedLine(''); }, [subDepartment]);
   // Auto-fill each member's department from the team's dept / sub-dept — but keep
   // any member whose department was manually changed.
@@ -167,7 +194,7 @@ export default function TeamRegistration() {
   }, [department, subDepartment]);
 
   const loadTeamForEdit = (team: Team) => {
-    setEditingTeamId(team.id);
+    setEditingTeamId(team.id); setChangeReason('');
     setTeamName(team.name); setDepartment(team.department);
     setSubDepartment(team.subDepartment || ''); setSelectedLine('');
     setLeaderName(team.leaderName); setFacilitatorName(team.facilitatorName);
@@ -250,11 +277,23 @@ export default function TeamRegistration() {
     // No sub-department → carry the department name in its place.
     const teamSubDept = subDepartment || department;
     const memberDept = teamSubDept;
-    const teamMembers: TeamMember[] = members.map((m, i) => ({ memberId: `TM-${String(Date.now()).slice(-3)}-${i + 1}`, teamId, memberName: m.memberName.trim(), employeeId: m.employeeId.trim(), department: m.department || memberDept, isActive: m.isActive, deactivationReason: m.deactivationReason || undefined, deactivatedAt: m.deactivatedAt || undefined }));
+    const teamMembers: TeamMember[] = members.map((m, i) => ({ memberId: newMemberId(i), teamId, memberName: m.memberName.trim(), employeeId: m.employeeId.trim(), department: m.department || memberDept, isActive: m.isActive, deactivationReason: m.deactivationReason || undefined, deactivatedAt: m.deactivatedAt || undefined }));
     if (editingTeamId) {
-      hy.setTeamHalf(editingTeamId, hy.active.half, hy.active.year);
-      setTeams(prev => prev.map(t => t.id === editingTeamId ? { ...t, name: teamName.trim(), department, subDepartment: teamSubDept, leaderName: leaderName.trim(), facilitatorName: facilitatorName.trim(), coordinatorName: coordinatorName.trim(), projectTheme: projectTheme.trim(), members: teamMembers } : t));
-      showToast('Team updated', 'success');
+      // Admin edits apply at once; anyone else's edit becomes a change request for approval.
+      try {
+        const res = await api.updateTeam(editingTeamId, {
+          name: teamName.trim(), department, subDepartment: teamSubDept,
+          leaderName: leaderName.trim(), facilitatorName: facilitatorName.trim(),
+          coordinatorName: coordinatorName.trim(), projectTheme: projectTheme.trim(),
+          members: teamMembers, changeReason: isAdmin ? undefined : changeReason.trim() || undefined,
+        });
+        hy.setTeamHalf(editingTeamId, hy.active.half, hy.active.year);
+        await reloadTeams();
+        showToast(res.applied ? 'Team updated' : (res.message || 'Change request submitted for approval'), res.applied ? 'success' : 'info');
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.message : 'Failed to update team', 'error');
+        return;
+      }
     } else {
       // NEW team → persist to the backend, then reload so it shows in the list.
       try {
@@ -263,12 +302,13 @@ export default function TeamRegistration() {
           subDepartment: teamSubDept,
           leaderName: leaderName.trim(), facilitatorName: facilitatorName.trim(),
           coordinatorName: coordinatorName.trim(), projectTheme: projectTheme.trim(),
-          members: teamMembers,
+          members: teamMembers, createdAt: periodCreatedAt(),
         });
         // Add the team to the currently-selected period (the header/form selector).
         hy.setTeamHalf(created.id, hy.active.half, hy.active.year);
         await reloadTeams();
-        showToast('Team registered', 'success');
+        const hidden = hiddenFromMe(leaderName, [leaderName, facilitatorName, coordinatorName, ...members.map(m => m.memberName)]);
+        showToast(hidden ? `Team ${created.id} registered — it is listed under its leader, so it won't show in your list` : 'Team registered', hidden ? 'info' : 'success');
       } catch (e) {
         showToast(e instanceof ApiError ? e.message : 'Failed to register team', 'error');
         return;
@@ -283,7 +323,7 @@ export default function TeamRegistration() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkImporting, setBulkImporting] = useState(false);
-  const [bulkSummary, setBulkSummary] = useState<{ imported: number; incomplete: number; failed: number; failures: string[] } | null>(null);
+  const [bulkSummary, setBulkSummary] = useState<{ imported: number; incomplete: number; failed: number; failures: string[]; hidden: string[] } | null>(null);
 
   const parseCSVLine = (line: string): string[] => {
     const out: string[] = []; let cur = ''; let q = false;
@@ -542,11 +582,12 @@ export default function TeamRegistration() {
     const valid = bulkRows.filter(r => !r.error);
     if (!valid.length) { showToast('No valid rows to import', 'error'); return; }
     setBulkImporting(true);
-    let ok = 0, incompleteOk = 0; const failures: string[] = [];
+    let ok = 0, incompleteOk = 0; const failures: string[] = []; const hidden: string[] = [];
+    const createdAt = periodCreatedAt();
     for (const r of valid) {
       try {
         const members: TeamMember[] = r.members.map((m, i) => ({
-          memberId: `TM-${Date.now().toString(36)}-${i + 1}`, teamId: '', memberName: m.name,
+          memberId: newMemberId(i), teamId: '', memberName: m.name,
           employeeId: m.empId, department: m.dept || r.subDepartment || r.department, isActive: true,
         }));
         // Persisting through the shared backend means the team instantly appears in
@@ -555,17 +596,18 @@ export default function TeamRegistration() {
         const created = await api.createTeam({
           name: r.name, department: r.department, subDepartment: r.subDepartment || undefined,
           leaderName: r.leader, facilitatorName: r.facilitator, coordinatorName: r.coordinator,
-          projectTheme: r.theme, members,
+          projectTheme: r.theme, members, createdAt,
         });
         hy.setTeamHalf(created.id, hy.active.half, hy.active.year);
         ok++;
         if (r.warn) incompleteOk++;
+        if (hiddenFromMe(r.leader, [r.leader, r.facilitator, r.coordinator, ...r.members.map(m => m.name)])) hidden.push(`${r.name} (${created.id})`);
       } catch (e) { failures.push(`${r.name || 'Unnamed team'}: ${e instanceof ApiError ? e.message : 'import failed'}`); }
     }
     await reloadTeams();
     setBulkImporting(false);
     setBulkRows([]);
-    setBulkSummary({ imported: ok, incomplete: incompleteOk, failed: failures.length, failures });
+    setBulkSummary({ imported: ok, incomplete: incompleteOk, failed: failures.length, failures, hidden });
     showToast(`Imported ${ok} team${ok === 1 ? '' : 's'}${incompleteOk ? ` (${incompleteOk} incomplete)` : ''}${failures.length ? `, ${failures.length} failed` : ''}.`, failures.length ? 'info' : 'success');
   };
 
@@ -669,6 +711,13 @@ export default function TeamRegistration() {
                         </ul>
                       )}
                     </div>
+                    {bulkSummary.hidden.length > 0 && (
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-[11px] text-blue-800">
+                        <p className="font-semibold mb-1">{bulkSummary.hidden.length} imported team{bulkSummary.hidden.length === 1 ? '' : 's'} won't show in your list</p>
+                        <p className="mb-2">They were saved, but you only see teams where you are {isLeader ? 'the Leader' : 'named as Leader, Facilitator, Coordinator or Member'}. Their leader and the Admin can see them.</p>
+                        <ul className="space-y-0.5 max-h-28 overflow-y-auto">{bulkSummary.hidden.map((h, i) => <li key={i}>• {h}</li>)}</ul>
+                      </div>
+                    )}
                   </div>
                 ) : (
                 <>
@@ -776,6 +825,7 @@ export default function TeamRegistration() {
                   <div className="flex items-start justify-between mb-3">
                     <div className="min-w-0 flex-1 flex items-center gap-2.5"><span className={`w-8 h-8 rounded-lg ${CHIP_ACCENTS[i % CHIP_ACCENTS.length]} flex items-center justify-center flex-shrink-0`}><Users size={16} /></span><div className="min-w-0"><div className="flex items-center gap-2 mb-1"><h3 className="text-sm font-bold text-slate-800 truncate">{team.name}</h3>{user?.role === 'admin' && <span title="Admin-locked"><Lock size={12} className="text-slate-400 flex-shrink-0" /></span>}</div><p className="text-xs text-blue-600 font-mono font-medium">{team.id}</p></div></div>
                     <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                      {pendingTeamIds.has(team.id) && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700" title="An edit to this team is waiting for Admin approval"><Clock size={10} /> Change pending</span>}
                       {incomplete && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700" title="Missing leader, coordinator or member codes"><AlertCircle size={10} /> Incomplete</span>}
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${team.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{team.status}</span>
                     </div>
@@ -870,7 +920,7 @@ export default function TeamRegistration() {
               <label className="flex items-center gap-1 text-sm font-semibold text-slate-700 mb-2">Department <span className="text-red-500 text-base leading-none">*</span></label>
               <div className="relative">
                 <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"><Building2 size={16} /></div>
-                <select value={department} onChange={e => { setDepartment(e.target.value); setErrors(p => ({ ...p, department: undefined })); }} onBlur={() => setTouched(p => ({ ...p, department: true }))} className={`${fieldClass('department', !!errors.department)} pl-10 bg-white`}>
+                <select value={department} onChange={e => { setDepartment(e.target.value); setSubDepartment(''); setSelectedLine(''); setErrors(p => ({ ...p, department: undefined })); }} onBlur={() => setTouched(p => ({ ...p, department: true }))} className={`${fieldClass('department', !!errors.department)} pl-10 bg-white`}>
                   <option value="">Select Department</option>
                   {hierarchy.departments.map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
@@ -1032,9 +1082,16 @@ export default function TeamRegistration() {
 
       {/* ─── Action Buttons ─── */}
       <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+        {editingTeamId && !isAdmin && (
+          <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-4">
+            <p className="text-xs font-semibold text-blue-800">Your changes go to the Admin for approval — the team stays as it is until they are approved.</p>
+            {pendingTeamIds.has(editingTeamId) && <p className="mt-1 text-[11px] text-blue-700">An earlier change for this team is still waiting for approval.</p>}
+            <textarea rows={2} value={changeReason} onChange={e => setChangeReason(e.target.value)} placeholder="Reason for the change (shown to the Admin)" className="mt-2 w-full px-3 py-2 border border-blue-200 rounded-lg text-sm bg-white outline-none resize-none focus:ring-2 focus:ring-blue-100" />
+          </div>
+        )}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
           <button onClick={() => handleSave(true)} className="flex items-center justify-center gap-2 px-5 py-2.5 border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50"><Save size={16} /> Save as Draft</button>
-          <button onClick={() => handleSave(false)} className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-8 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg shadow-sm shadow-blue-600/20"><CheckCircle2 size={16} /> {editingTeamId ? 'Update Team' : 'Register Team'}</button>
+          <button onClick={() => handleSave(false)} className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-8 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg shadow-sm shadow-blue-600/20"><CheckCircle2 size={16} /> {editingTeamId ? (isAdmin ? 'Update Team' : 'Send for Approval') : 'Register Team'}</button>
           <button onClick={() => setView('list')} className="flex items-center justify-center gap-2 px-5 py-2.5 text-slate-600 text-sm font-medium hover:bg-slate-50 rounded-lg">Cancel</button>
         </div>
       </div>

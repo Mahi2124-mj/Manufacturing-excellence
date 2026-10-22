@@ -3,20 +3,9 @@ import { useAuth } from '../lib/auth';
 import { Eye, EyeOff, Loader2, AlertCircle } from 'lucide-react';
 import ForgotPassword from '../components/ForgotPassword';
 
-// Quick demo logins — one representative account per role, for demos only.
-// These seeded demo accounts share the password `demo123`.
-// NOTE: the Admin account is intentionally NOT here — it is a real account whose
-// password is managed in Settings (changing it there persists and the old one
-// stops working). Hard-coding demo123 for admin would be a backdoor. Admin signs
-// in via the form above with its real password.
-const DEMO_ACCOUNTS = [
-  { label: 'Dept Head', name: 'Vikram Singh', email: 'vikram@qcc.com' },
-  { label: 'Facilitator', name: 'Amit Patel', email: 'amit@qcc.com' },
-  { label: 'Coordinator', name: 'Sneha Reddy', email: 'sneha@qcc.com' },
-  { label: 'Leader', name: 'Priya Sharma', email: 'priya@qcc.com' },
-  { label: 'Member', name: 'Anita Desai', email: 'anita@qcc.com' },
-];
-
+// Every user signs in with their own username (or email) + password, both managed by
+// the Admin in User Management. There are no hard-coded quick-login accounts: they
+// always sent the seed password, so they broke as soon as an Admin reset a password.
 export default function Login() {
   const { login, error: authError } = useAuth();
   const [email, setEmail] = useState('');
@@ -29,14 +18,6 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     await login(email, password);
-    setLoading(false);
-  };
-
-  const quickLogin = async (acct: (typeof DEMO_ACCOUNTS)[number]) => {
-    setEmail(acct.email);
-    setPassword('demo123');
-    setLoading(true);
-    await login(acct.email, 'demo123');
     setLoading(false);
   };
 
@@ -82,12 +63,12 @@ export default function Login() {
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">Username or Email</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Username</label>
               <input
                 type="text"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="e.g. admin or leader"
+                placeholder="e.g. amit, Amit Patel or full email"
                 autoComplete="username"
                 className="w-full px-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                 required
@@ -130,32 +111,9 @@ export default function Login() {
               {loading ? <><Loader2 size={16} className="animate-spin" /> Signing in...</> : 'Sign In'}
             </button>
           </form>
-
-          {/* Quick demo login */}
-          <div className="mt-6">
-            <div className="relative flex items-center">
-              <div className="flex-1 border-t border-slate-200" />
-              <span className="px-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Quick demo login</span>
-              <div className="flex-1 border-t border-slate-200" />
-            </div>
-            <div className="grid grid-cols-2 gap-2 mt-4">
-              {DEMO_ACCOUNTS.map(acct => (
-                <button
-                  key={acct.email}
-                  type="button"
-                  onClick={() => quickLogin(acct)}
-                  disabled={loading}
-                  className="text-left px-3 py-2 rounded-lg border border-slate-200 hover:border-blue-400 hover:bg-blue-50 disabled:opacity-60 transition-colors"
-                >
-                  <span className="block text-sm font-semibold text-slate-700">{acct.label}</span>
-                  <span className="block text-xs text-slate-400 truncate">{acct.name}</span>
-                </button>
-              ))}
-            </div>
-            <p className="text-center text-xs text-slate-400 mt-3">
-              Demo accounts use <span className="font-mono font-medium text-slate-500">demo123</span>. Admin signs in above with its own password.
-            </p>
-          </div>
+          <p className="text-center text-xs text-slate-400 mt-5">
+            No account or forgot your username? Ask your QCC Admin.
+          </p>
         </div>
         )}
 

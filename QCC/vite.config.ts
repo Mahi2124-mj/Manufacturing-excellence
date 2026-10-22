@@ -23,7 +23,8 @@ export default defineConfig(async ({ mode }) => {
     define: processEnvDefines,
     // Dev server runs on 6001. (Port 6000 is on the browsers' blocked-ports
     // list — X11 — so http://localhost:6000 fails with ERR_UNSAFE_PORT.)
-    server: { port: 6001, strictPort: true },
-    preview: { port: 6001, strictPort: true },
+    // host: true listens on every network address so other PCs on the LAN can open it.
+    server: { port: 6001, strictPort: true, host: true },
+    preview: { port: 6001, strictPort: true, host: true },
   };
 })

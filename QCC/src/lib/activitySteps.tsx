@@ -13,11 +13,15 @@ import {
   Award, Users, FileText, Settings, type LucideIcon,
 } from 'lucide-react';
 import { mockActivitySteps } from './data';
+import { sharedStore } from './sharedStore';
+import { useServerConfig } from './useServerConfig';
 import type { ActivityStep } from '../types';
 
 // v2: re-seed the corrected step order for everyone (7 Standardization → 8 Overall
 // Benefits → 9 Final Project Closure); bumping the key discards any stale v1 order.
+// The server copy (SERVER_KEY) is the one every PC shares; localStorage is only a cache.
 const STORAGE_KEY = 'qcc-activity-steps-v2';
+const SERVER_KEY = 'config-activity-steps';
 
 const ICON_MAP: Record<string, LucideIcon> = {
   Lightbulb, Target, Calendar, GitBranch, Rocket, CheckCircle, BookOpen,
@@ -74,11 +78,20 @@ export function ActivityStepsProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  // Every mutation runs through here: re-number `order` to array position and persist.
+  // The shared (server) configuration replaces this browser's copy once loaded.
+  useServerConfig(SERVER_KEY, data => {
+    if (!Array.isArray(data) || !data.length) return;
+    setSteps(data as ActivityStep[]);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+  });
+
+  // Every mutation runs through here: re-number `order` to array position and persist
+  // (server + local cache).
   const persist = useCallback((updater: (prev: ActivityStep[]) => ActivityStep[]) => {
     setSteps(prev => {
       const next = updater(prev).map((s, i) => ({ ...s, order: i + 1 }));
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      sharedStore.set(SERVER_KEY, next);
       return next;
     });
   }, []);

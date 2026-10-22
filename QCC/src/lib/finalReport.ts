@@ -7,6 +7,16 @@ import type { QCCProject, Team } from '../types';
 import type { WorkflowStepView } from './activitySteps';
 import type { ClosureState } from '../components/FinalProjectClosure';
 import { CIRCLE_ASSESSMENT, circleLevel } from './circleAssessment';
+import { sharedStore } from './sharedStore';
+
+// Every saved document the report reads for one project — load these (sharedStore.load)
+// before building the report so it shows the latest data from the server.
+export const reportKeys = (projectId: string, teamId?: string): string[] => [
+  `step-theme/${projectId}`, `step-current-target/${projectId}`, `step-activity-plan/${projectId}`,
+  `step-fishbone/${projectId}`, `step-whywhy/${projectId}`, `step-countermeasure/${projectId}`,
+  `step-results/${projectId}`, `step-standardization/${projectId}`, `step-benefits/${projectId}`,
+  `step-closure/${projectId}`, ...(teamId ? [`team-assessment/${teamId}`] : []),
+];
 
 export interface ReportCtx {
   project: QCCProject;
@@ -18,7 +28,7 @@ export interface ReportCtx {
 }
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
-const readLS = (key: string): any => { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : null; } catch { return null; } };
+const readDoc = (key: string): any => sharedStore.get(key);
 const num = (v: unknown) => { const n = parseFloat(String(v ?? '').replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : 0; };
 const fmt = (n: number) => n % 1 === 0 ? n.toLocaleString('en-IN') : n.toFixed(1);
 const inr = (n: number) => '₹' + n.toLocaleString('en-IN');
@@ -117,8 +127,8 @@ function fishboneSvg(problem: string, groups: Record<string, string[]>): string 
 }
 
 // Team skill assessment (Circle Assessment) — X/Y radars + skill-metric table.
-function teamAssessmentSection(): string {
-  const data = readLS('qcc-circle-assessment-v4');
+function teamAssessmentSection(teamId?: string): string {
+  const data = teamId ? readDoc(`team-assessment/${teamId}`) : null;
   const members: any[] = data?.members || [];
   if (!members.length) return '';
   const checked = data.checked || {};
@@ -155,7 +165,7 @@ const table = (headers: string[], rows: string[][]) =>
 
 // ── Per-step section builders (return '' when empty → section is dropped) ──
 function themeSection(p: QCCProject): string {
-  const saved = readLS(`qcc-problem-identification-${p.id}`);
+  const saved = readDoc(`step-theme/${p.id}`);
   const points: any[] = saved?.points ?? [];
   const chosen = points.find(pt => pt.id === saved?.selectedThemeId);
   let body = `<p><strong>Theme / Title:</strong> ${esc(p.title)}</p>`;
@@ -164,8 +174,32 @@ function themeSection(p: QCCProject): string {
   if (points.length) body += table(['#', 'Candidate Improvement Theme'], points.map((pt, i) => [String(pt.sr ?? i + 1), esc(pt.description)]));
   return body;
 }
+function currentTargetSection(p: QCCProject): string {
+  const data = readDoc(`step-current-target/${p.id}`);
+  const metrics: any[] = (data?.metrics || []).filter((m: any) => m?.name);
+  const rows: any[] = (data?.rows || []).filter((r: any) => r?.label);
+  let body = '';
+  if (metrics.length) body += `<h3>Current vs Target</h3>` + table(['Metric', 'Unit', 'Current', 'Target'],
+    metrics.map(m => [esc(m.name), esc(m.unit || '—'), esc(fmt(num(m.currentValue))), esc(fmt(num(m.targetValue)))]));
+  if (rows.length) body += `<h3>${esc(data?.category === 'Custom' ? (data?.customName || 'Analysis') : (data?.category || 'Analysis'))} data</h3>`
+    + bars(rows.map(r => ({ label: r.label, value: num(r.value) })), '#2563eb');
+  return body;
+}
+function resultsSection(p: QCCProject): string {
+  const data = readDoc(`step-results/${p.id}`);
+  const metrics: any[] = (data?.metrics || []).filter((m: any) => m?.name);
+  if (!metrics.length) return '';
+  const met = (m: any) => (m.higherIsBetter ? num(m.actualValue) >= num(m.targetValue) : num(m.actualValue) <= num(m.targetValue));
+  let body = groupedBars(metrics.map(m => ({ label: m.name, a: num(m.beforeValue), b: num(m.actualValue) })), 'Before', 'Actual');
+  body += table(['Metric', 'Unit', 'Before', 'Target', 'Actual', 'Result'], metrics.map(m => [
+    esc(m.name), esc(m.unit || '—'), esc(fmt(num(m.beforeValue))), esc(fmt(num(m.targetValue))), esc(fmt(num(m.actualValue))),
+    `<span class="pill ${met(m) ? 'ok' : 'warn'}">${met(m) ? 'Achieved' : 'Not achieved'}</span>`,
+  ]));
+  if (num(data?.annualSaving) > 0) body += `<p class="kpi"><span>Estimated Annual Saving (validated)</span><strong>${inr(num(data.annualSaving))}</strong></p>`;
+  return body;
+}
 function activityPlanSection(p: QCCProject): string {
-  const entries: any[] = readLS(`gantt-${p.id}`) || [];
+  const entries: any[] = readDoc(`step-activity-plan/${p.id}`) || [];
   if (!entries.length) return '';
   return table(['Activity', 'PIC', 'Planned Start', 'Planned End', 'Actual Start', 'Actual End', 'Status'],
     entries.map(e => [esc(e.activityName), esc(e.pic || '—'), esc(e.plannedStart || '—'), esc(e.plannedEnd || '—'), esc(e.actualStart || '—'), esc(e.actualEnd || '—'), esc((e.status || '').replace(/_/g, ' '))]));
@@ -173,7 +207,7 @@ function activityPlanSection(p: QCCProject): string {
 function rootCauseSection(p: QCCProject): string {
   // Fishbone (Ishikawa) chart from the persisted Step-4 causes.
   let fishbone = '';
-  const fb = readLS(`qcc-fishbone-${p.id}`);
+  const fb = readDoc(`step-fishbone/${p.id}`);
   if (fb && Array.isArray(fb.causes) && fb.causes.length) {
     const groups: Record<string, string[]> = {};
     fb.causes.forEach((c: any) => { if (c?.text) { (groups[c.category] || (groups[c.category] = [])).push(c.text); } });
@@ -182,7 +216,7 @@ function rootCauseSection(p: QCCProject): string {
     if (svg) fishbone = `<h3>Fishbone (Ishikawa) Diagram</h3>${svg}<p class="cap">Effect / Problem: ${esc(problem)}</p>`;
   }
 
-  const rows: any[] = readLS(`qcc-whywhy-${p.id}`) || [];
+  const rows: any[] = readDoc(`step-whywhy/${p.id}`) || [];
   const chains = rows.map(r => {
     const whys = ['why1', 'why2', 'why3', 'why4', 'why5']
       .map(k => (r.whyLevels?.[k] || []).map((w: any) => w.text).filter(Boolean).join('; '))
@@ -194,7 +228,7 @@ function rootCauseSection(p: QCCProject): string {
   return fishbone + (chains ? `<h3>Why-Why Analysis &amp; Root Causes</h3>${chains}` : '');
 }
 function countermeasureSection(p: QCCProject): string {
-  const rcs: any[] = readLS(`qcc-countermeasure-v2-${p.id}`) || [];
+  const rcs: any[] = readDoc(`step-countermeasure/${p.id}`) || [];
   if (!rcs.length) return '';
   const rows: string[][] = [];
   rcs.forEach(rc => {
@@ -208,11 +242,11 @@ function countermeasureSection(p: QCCProject): string {
   });
   return table(['Root Cause', 'Approved / Best Countermeasure', 'Status', 'Implementation'], rows);
 }
-function standardizationSection(): string {
-  const data = readLS('qcc-standardization-control');
+function standardizationSection(p: QCCProject): string {
+  const data = readDoc(`step-standardization/${p.id}`);
   if (!data) return '';
   let body = '';
-  const docs: any[] = data.docs || [];
+  const docs: any[] = (data.docs || []).filter((d: any) => d?.documentName || d?.documentType);
   const ctrl: any[] = data.ctrl || [];
   if (docs.length) body += `<h3>Standardization Documents</h3>` + table(['Type', 'Document', 'Doc No.', 'Rev'], docs.map(d => [esc(d.documentType), esc(d.documentName), esc(d.docNumber || '—'), esc(d.revNo || '—')]));
   const filledCtrl = ctrl.filter(r => r.when || r.who || r.frequency || r.what);
@@ -221,7 +255,7 @@ function standardizationSection(): string {
   return body;
 }
 function benefitsSection(p: QCCProject): { body: string; totalSaving: number } {
-  const data = readLS(`qcc-overall-benefits-v2-${p.id}`);
+  const data = readDoc(`step-benefits/${p.id}`);
   if (!data) return { body: '', totalSaving: 0 };
   const tangible: any[] = data.tangible || [];
   const intangible: any[] = data.intangible || [];
@@ -261,10 +295,12 @@ export function buildFinalReportHTML(ctx: ReportCtx): string {
   // Per-step detailed sections — only for APPROVED steps (empty ones drop out).
   const built: Record<string, () => string> = {
     theme: () => themeSection(p),
+    'current-target': () => currentTargetSection(p),
     'activity-plan': () => activityPlanSection(p),
     'root-cause': () => rootCauseSection(p),
     countermeasure: () => countermeasureSection(p),
-    standardization: () => standardizationSection(),
+    results: () => resultsSection(p),
+    standardization: () => standardizationSection(p),
   };
   const stepSections = workflowSteps
     .filter(s => s.workflowKey && built[s.workflowKey] && stepApproved(p, s.number))
@@ -351,7 +387,7 @@ export function buildFinalReportHTML(ctx: ReportCtx): string {
     ${section('Approval Overview', overview + `<p style="color:#64748b;font-size:10px;margin-top:6px">This report includes detailed data only from <strong>approved</strong> steps.</p>`)}
     ${stepSections}
     ${benefitsHtml}
-    ${section('Team Skill Assessment — Radar (Circle Assessment)', teamAssessmentSection())}
+    ${section('Team Skill Assessment — Radar (Circle Assessment)', teamAssessmentSection(team?.id))}
     ${section('Advisor Final Approval & Project Closure', closureBody)}
 
     <div class="footer">QCC Monitor — Final Project Report · Generated ${esc(generatedAt)} · Confidential</div>

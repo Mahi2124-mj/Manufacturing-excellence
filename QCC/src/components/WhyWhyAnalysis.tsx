@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { sharedStore } from '../lib/sharedStore';
 import {
   Plus,
   Trash2,
@@ -43,35 +44,13 @@ interface CauseRow {
   };
 }
 
-const INITIAL_DATA: CauseRow[] = [
-  {
-    id: '1',
-    cause: 'Operator skill gap',
-    // Only Why 1 exists up front — deeper levels appear as the user clicks "Add Why".
-    whyLevels: {
-      why1: [{ id: 'w1-1', text: 'Operators lack proper training on new equipment' }],
-      why2: [],
-      why3: [],
-      why4: [],
-      why5: [],
-    },
-    rootCause: 'Absence of structured training needs assessment process',
-    countermeasure: 'Implement quarterly skill gap analysis and update training curriculum',
-    status: 'in_progress',
-    verification: {
-      factVerified: true,
-      dataAvailable: false,
-      canExplain: true,
-      actionable: true,
-    },
-  },
-];
-
 export default function WhyWhyAnalysis({ projectId }: { projectId?: string }) {
-  const storageKey = `qcc-whywhy-${projectId || 'default'}`;
+  // Saved per project on the server (shared by every PC); loaded before this step mounts.
+  // A new project starts with no causes (a sample cause used to be pre-filled here).
+  const storageKey = `step-whywhy/${projectId || 'default'}`;
   const [rows, setRows] = useState<CauseRow[]>(() => {
-    try { const s = localStorage.getItem(storageKey); if (s) return JSON.parse(s); } catch { /* default */ }
-    return INITIAL_DATA;
+    const s = sharedStore.get<CauseRow[]>(storageKey);
+    return Array.isArray(s) ? s : [];
   });
   const [collapsed, setCollapsed] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -84,11 +63,9 @@ export default function WhyWhyAnalysis({ projectId }: { projectId?: string }) {
   // (Countermeasure Study) can auto-import them.
   useEffect(() => {
     const t = setTimeout(() => {
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(rows));
-        const rcs = [...new Set(rows.map(r => r.rootCause.trim()).filter(Boolean))];
-        localStorage.setItem(`qcc-step4-rootcauses-${projectId || 'default'}`, JSON.stringify(rcs));
-      } catch { /* quota */ }
+      sharedStore.set(storageKey, rows);
+      const rcs = [...new Set(rows.map(r => (r.rootCause || '').trim()).filter(Boolean))];
+      sharedStore.set(`step-rootcauses/${projectId || 'default'}`, rcs);
     }, 500);
     return () => clearTimeout(t);
   }, [rows, storageKey, projectId]);

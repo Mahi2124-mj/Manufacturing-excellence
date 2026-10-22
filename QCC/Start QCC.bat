@@ -12,14 +12,19 @@ REM ---------- 1) BACKEND (port 8000) ----------
 REM NOTE: never reference %~dp0 inside an if(...) block - the "(2)" in the folder
 REM path would prematurely close the block. Directory work is done in subroutines.
 netstat -ano | findstr ":8000" | findstr LISTENING >nul 2>&1
-if %errorlevel%==0 (echo   [1/2] Backend already running   -^>  http://127.0.0.1:8000) else (call :start_backend)
+if %errorlevel%==0 (echo   [1/2] Backend already running   -^>  port 8000) else (call :start_backend)
 
 REM ---------- 2) FRONTEND (port 6001) ----------
 netstat -ano | findstr ":6001" | findstr LISTENING >nul 2>&1
-if %errorlevel%==0 (echo   [2/2] Frontend already running  -^>  http://localhost:6001) else (call :start_frontend)
+if %errorlevel%==0 (echo   [2/2] Frontend already running  -^>  port 6001) else (call :start_frontend)
 
 echo(
-echo   Login:   use your QCC account (username / password)
+echo   Login:   use your QCC username / password
+echo   This PC:     http://localhost:6001
+echo   Other PCs on the same network can open:
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4 Address"') do call :show_url %%a
+echo   (If other PCs cannot open it, allow ports 6001 and 8000 in Windows Firewall.)
+echo(
 echo   Keep the "QCC Backend" and "QCC Frontend" windows open while using the app.
 echo   To close everything later, run  "Stop QCC.bat".
 echo(
@@ -31,11 +36,16 @@ start "" http://localhost:6001
 timeout /t 3 >nul
 goto :eof
 
+:show_url
+echo                 http://%1:6001
+goto :eof
+
 :start_backend
 echo   [1/2] Starting backend...
 REM DATABASE_URL is read from backend\.env (PostgreSQL). No SQLite override here.
+REM --host 0.0.0.0 so other PCs on the network can reach the API, not only this PC.
 cd /d "%~dp0backend"
-start "QCC Backend" ".venv\Scripts\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000
+start "QCC Backend" ".venv\Scripts\python.exe" -m uvicorn main:app --host 0.0.0.0 --port 8000
 cd /d "%~dp0"
 goto :eof
 

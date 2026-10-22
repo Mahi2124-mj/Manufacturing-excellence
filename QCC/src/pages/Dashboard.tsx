@@ -9,12 +9,16 @@ import {
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
+import { sharedStore } from '../lib/sharedStore';
 import HeaderPortal from '../components/layout/HeaderPortal';
 import { useHalfYear } from '../lib/halfYear';
 import { useHierarchy } from '../lib/hierarchy';
 import { useActivitySteps } from '../lib/activitySteps';
 import { useMeetingSchedules, computeScheduleDate } from '../lib/meetingSchedules';
-import type { Team, QCCProject, Department, DashboardStats } from '../types';
+import { formatTime } from '../lib/format';
+import type { Team, QCCProject, ActionItem, ApprovalRequest } from '../types';
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -24,44 +28,65 @@ export default function Dashboard() {
   const { schedules } = useMeetingSchedules();     // Admin → Meeting Schedule (for the Upcoming Meetings card)
   const [selectedDepartment, setSelectedDepartment] = useState<string>('all');
 
-  const [stats, setStats] = useState<DashboardStats>({
-    totalTeams: 0, activeProjects: 0, overdueActions: 0,
-    pendingApprovals: 0, completedProjects: 0, totalSavings: 0,
-  });
   const [teams, setTeams] = useState<Team[]>([]);
   const [projects, setProjects] = useState<QCCProject[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
+  const [actions, setActions] = useState<ActionItem[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([api.dashboardStats(), api.listTeams(), api.listProjects(), api.listDepartments()])
-      .then(([s, t, p, d]) => {
+    // Actions and approvals are loaded as lists (not the server's org-wide totals) so the
+    // KPI cards can follow the selected QCC period like every other number on this page.
+    Promise.all([api.listTeams(), api.listProjects(), api.listActions(), api.listApprovals()])
+      .then(([t, p, a, ap]) => {
         if (cancelled) return;
-        setStats(s); setTeams(t); setProjects(p); setDepartments(d);
+        setTeams(t); setProjects(p); setActions(a); setApprovals(ap); setLoadedAt(new Date());
       })
       .catch(e => { if (!cancelled) setError(e instanceof ApiError ? e.message : 'Failed to load dashboard'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
 
+  // Saved QCC sheets (shared by every PC): Step 8 benefits, Team Evaluation levels and
+  // Team Assessment summaries. A failure here only leaves those figures empty.
+  const [benefitDocs, setBenefitDocs] = useState<Record<string, { tangible?: { yearlySaving?: string }[] }>>({});
+  const [teamLevels, setTeamLevels] = useState<Record<string, string>>({});
+  const [assessDocs, setAssessDocs] = useState<Record<string, { summary?: { improvement?: number } }>>({});
+  useEffect(() => {
+    if (!loadedAt) return;
+    let cancelled = false;
+    sharedStore.loadKind<{ tangible?: { yearlySaving?: string }[] }>('step-benefits', projects.map(p => `step-benefits/${p.id}`))
+      .then(d => { if (!cancelled) setBenefitDocs(d); }).catch(() => { /* leave empty */ });
+    sharedStore.load(['eval-team-levels'], { force: true })
+      .then(() => { if (!cancelled) setTeamLevels(sharedStore.get<Record<string, string>>('eval-team-levels') || {}); }).catch(() => { /* leave empty */ });
+    sharedStore.loadKind<{ summary?: { improvement?: number } }>('team-assessment')
+      .then(d => { if (!cancelled) setAssessDocs(d); }).catch(() => { /* leave empty */ });
+    return () => { cancelled = true; };
+  }, [loadedAt]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => { hy.registerDates([...teams.map(t => t.createdAt), ...projects.map(p => p.startedAt)]); }, [teams, projects]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scope teams & projects to the active period (header switcher).
   const hyTeams = useMemo(() => teams.filter(t => hy.isTeamActive(t.id, t.createdAt)), [teams, hy]);
   const hyProjects = useMemo(() => projects.filter(p => hy.isProjectActive(p.teamId, p.startedAt)), [projects, hy]);
+  // Actions and approvals belong to the period of their project.
+  const hyProjectIds = useMemo(() => new Set(hyProjects.map(p => p.id)), [hyProjects]);
+  const overdueActions = actions.filter(a => a.status === 'overdue' && hyProjectIds.has(a.projectId)).length;
+  const pendingApprovals = approvals.filter(a => a.status === 'pending' && hyProjectIds.has(a.projectId)).length;
+  const totalSteps = workflowSteps.length || 7;
+  const approvedSteps = (p: QCCProject) => p.steps.filter(s => s.status === 'approved').length;
 
   // ── Team Involvement (masterlist) — level from Team Evaluation, improvement from Team Assessment ──
-  const teamLevels = useMemo<Record<string, string>>(() => { try { return JSON.parse(localStorage.getItem('qcc-eval-team-levels') || '{}'); } catch { return {}; } }, []);
-  const assessSummary = useMemo<Record<string, { improvement: number }>>(() => { try { return JSON.parse(localStorage.getItem('qcc-assessment-summary-v1') || '{}'); } catch { return {}; } }, []);
   const involvement = useMemo(() => hyTeams.map(t => ({
     id: t.id, name: t.name, theme: t.projectTitle || '—', department: t.department,
     level: teamLevels[t.id] || 'Staff',
     members: t.members.filter(m => m.isActive).length,
-    improvement: assessSummary[t.id]?.improvement,
-  })), [hyTeams, teamLevels, assessSummary]);
+    improvement: assessDocs[`team-assessment/${t.id}`]?.summary?.improvement,
+  })), [hyTeams, teamLevels, assessDocs]);
   const staffCount = involvement.filter(i => i.level === 'Staff').length;
   const associateCount = involvement.filter(i => i.level === 'Associate').length;
   // Team Involvement — filtered to the level picked in its own dropdown.
@@ -158,12 +183,25 @@ export default function Dashboard() {
       .sort((a, b) => (b.teams - a.teams) || (b.projects - a.projects) || a.name.localeCompare(b.name));
   }, [hyTeams, hyProjects]);
 
-  const monthlyTrend = [
-    { month: 'Jan', projects: 1, completions: 0 }, { month: 'Feb', projects: 2, completions: 0 },
-    { month: 'Mar', projects: 3, completions: 0 }, { month: 'Apr', projects: 4, completions: 1 },
-    { month: 'May', projects: 4, completions: 1 }, { month: 'Jun', projects: 5, completions: 2 },
-    { month: 'Jul', projects: 5, completions: 2 }, { month: 'Aug', projects: 5, completions: 3 },
-  ];
+  // Month by month across the selected QCC period: projects running in that month, and
+  // projects that finished in it (the date their last workflow step was approved).
+  const monthlyTrend = useMemo(() => {
+    const { year, half } = hy.active;
+    const startM = parseInt(hy.ranges[half].start.slice(0, 2), 10) || 1;
+    const endM = parseInt(hy.ranges[half].end.slice(0, 2), 10) || 12;
+    const finishedOn = (p: QCCProject) => (p.status === 'completed'
+      ? ([...p.steps.map(s => (s.completedAt || '').slice(0, 10))].sort().pop() || (p.targetCompletion || '').slice(0, 10))
+      : '');
+    return Array.from({ length: Math.max(1, endM - startM + 1) }, (_, i) => startM + i).map(m => {
+      const from = `${year}-${String(m).padStart(2, '0')}-01`;
+      const to = `${year}-${String(m).padStart(2, '0')}-31`;
+      return {
+        month: MONTHS[m - 1],
+        projects: hyProjects.filter(p => (p.startedAt || '').slice(0, 10) <= to && !(finishedOn(p) && finishedOn(p) < from)).length,
+        completions: hyProjects.filter(p => { const f = finishedOn(p); return !!f && f >= from && f <= to; }).length,
+      };
+    });
+  }, [hyProjects, hy.active, hy.ranges]);
 
   const statusDistribution = [
     { name: 'In Progress', value: hyProjects.filter(p => p.status === 'in_progress').length, color: '#3b82f6' },
@@ -209,14 +247,10 @@ export default function Dashboard() {
     return i >= 0 ? i : Math.max(0, (workflowSteps.length || 8) - 1);
   }, [workflowSteps]);
   const stepEightSavings = useMemo(() => hyProjects.reduce((total, p) => {
-    try {
-      const raw = localStorage.getItem(`qcc-overall-benefits-v2-${p.id}`);
-      if (!raw) return total;
-      const rows = JSON.parse(raw).tangible;
-      if (!Array.isArray(rows)) return total;
-      return total + rows.reduce((s: number, r: { yearlySaving?: string }) => s + (parseFloat(String(r.yearlySaving ?? '').replace(/[^0-9.-]/g, '')) || 0), 0);
-    } catch { return total; }
-  }, 0), [hyProjects]);
+    const rows = benefitDocs[`step-benefits/${p.id}`]?.tangible;
+    if (!Array.isArray(rows)) return total;
+    return total + rows.reduce((s, r) => s + (parseFloat(String(r?.yearlySaving ?? '').replace(/[^0-9.-]/g, '')) || 0), 0);
+  }, 0), [hyProjects, benefitDocs]);
   const totalSavings = stepEightSavings > 0 ? stepEightSavings : hyProjects.reduce((s, p) => s + (p.savings || 0), 0);
   const openBenefitsStep = () => { try { localStorage.setItem('qcc-workflow-step', String(benefitsIndex)); } catch { /* ignore */ } navigate('/workflow'); };
   const openCompletedProjects = () => { try { localStorage.setItem('qcc-projects-status', 'completed'); } catch { /* ignore */ } navigate('/projects'); };
@@ -225,8 +259,8 @@ export default function Dashboard() {
   const statCards: { label: string; value: number | string; icon: ReactNode; accent: string; sub: string; to?: string; onClick?: () => void }[] = [
     { label: 'Registered Teams', value: hyTeams.length, icon: <Users size={20} />, accent: 'violet', sub: 'total teams', to: '/team-registration' },
     { label: 'Active Projects', value: hyProjects.filter(p => p.status === 'in_progress').length, icon: <FolderKanban size={20} />, accent: 'emerald', sub: 'in progress', to: '/projects' },
-    { label: 'Overdue Actions', value: stats.overdueActions, icon: <Clock size={20} />, accent: 'blue', sub: 'need attention', to: '/actions' },
-    { label: 'Pending Approvals', value: stats.pendingApprovals, icon: <AlertTriangle size={20} />, accent: 'amber', sub: 'awaiting review', to: '/approvals' },
+    { label: 'Overdue Actions', value: overdueActions, icon: <Clock size={20} />, accent: 'blue', sub: 'need attention', to: '/actions' },
+    { label: 'Pending Approvals', value: pendingApprovals, icon: <AlertTriangle size={20} />, accent: 'amber', sub: 'awaiting review', to: '/approvals' },
     { label: 'Completed', value: hyProjects.filter(p => p.status === 'completed').length, icon: <CheckCircle2 size={20} />, accent: 'cyan', sub: 'projects done', onClick: openCompletedProjects },
     { label: 'Total Savings', value: `₹${(totalSavings / 1000).toFixed(0)}K`, icon: <TrendingUp size={20} />, accent: 'rose', sub: 'from Step 8 benefits', onClick: openBenefitsStep },
   ];
@@ -249,13 +283,15 @@ export default function Dashboard() {
   const isOverdue = (p: QCCProject) => !isDone(p) && !!p.targetCompletion && p.targetCompletion.slice(0, 10) < todayISO;
   const delayedTeams = hyProjects.filter(isOverdue).length;
   const onTimeTeams = hyProjects.filter(p => !isOverdue(p)).length;
+  // Same progress rule as QCC Projects: approved steps out of the configured workflow steps.
   const avgProgress = activeProjects.length
-    ? Math.round(activeProjects.reduce((sum, p) => {
-        const steps = p.steps || [];
-        const done = steps.filter(st => st.status === 'approved').length;
-        return sum + (steps.length ? (done / steps.length) * 100 : 0);
-      }, 0) / activeProjects.length)
+    ? Math.round(activeProjects.reduce((sum, p) => sum + Math.min(100, (approvedSteps(p) / totalSteps) * 100), 0) / activeProjects.length)
     : 0;
+  // Recent Projects: this period's projects, newest first.
+  const recentProjects = useMemo(
+    () => [...hyProjects].sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || '')),
+    [hyProjects],
+  );
 
   // Upcoming meetings = schedules whose computed date is today or later (Admin → Meeting Schedule).
   const upcomingMeetings = useMemo(() =>
@@ -416,7 +452,7 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-            <span className="inline-flex items-center gap-1.5"><RefreshCw size={12} className="text-slate-400" /> Last updated: just now</span>
+            <span className="inline-flex items-center gap-1.5"><RefreshCw size={12} className="text-slate-400" /> Last updated: {loadedAt ? formatTime(loadedAt) : '—'}</span>
           </div>
         </div>
 
@@ -505,7 +541,7 @@ export default function Dashboard() {
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-around text-sm">
             <span className="text-slate-500">Peak Active <strong className="text-slate-800 ml-1">{peakActive}</strong></span>
-            <span className="text-slate-500">Total Completed <strong className="text-emerald-700 ml-1">{stats.completedProjects}</strong></span>
+            <span className="text-slate-500">Total Completed <strong className="text-emerald-700 ml-1">{hyProjects.filter(p => p.status === 'completed').length}</strong></span>
           </div>
         </div>
         {/* Department-wise Teams & Projects */}
@@ -645,17 +681,18 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {projects.map(p => {
-                  const progress = Math.round((p.steps.filter(s => s.status === 'approved').length / 7) * 100);
+                {recentProjects.map(p => {
+                  const done = approvedSteps(p);
+                  const progress = Math.min(100, Math.round((done / totalSteps) * 100));
                   return (
                     <tr key={p.id} onClick={() => navigate('/projects')} className="hover:bg-blue-50 cursor-pointer transition-colors">
                       <td className="px-6 py-3">
                         <p className="text-sm font-medium text-slate-800">{p.title}</p>
-                        <p className="text-xs text-slate-500">{p.teamId}</p>
+                        <p className="text-xs text-slate-500">{teams.find(t => t.id === p.teamId)?.name || p.teamId}</p>
                       </td>
                       <td className="px-6 py-3 text-sm text-slate-600">{p.department}</td>
                       <td className="px-6 py-3">
-                        <span className="text-xs font-medium text-slate-700">Step {p.steps.filter(s => s.status === 'approved').length + 1} / 7</span>
+                        <span className="text-xs font-medium text-slate-700">{done >= totalSteps ? 'All steps done' : `Step ${done + 1} / ${totalSteps}`}</span>
                       </td>
                       <td className="px-6 py-3">
                         <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${

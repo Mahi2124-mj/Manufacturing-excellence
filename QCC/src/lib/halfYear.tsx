@@ -13,6 +13,8 @@
 // never opens empty.
 import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect, type ReactNode } from 'react';
 import { useCycles } from './cycles';
+import { sharedStore } from './sharedStore';
+import { useServerConfig } from './useServerConfig';
 
 export type HalfKey = 'H1' | 'H2';
 export interface HalfRange { start: string; end: string } // 'MM-DD'
@@ -120,9 +122,24 @@ export function HalfYearProvider({ children }: { children: ReactNode }) {
   const userPicked = useRef(stored != null);
   const [active, setActiveState] = useState<Period>(stored ?? { year: currentYear, half: 'H1' });
 
+  // The half-year windows and the per-team period pins are shared through the server so
+  // every PC files teams into the same period; localStorage keeps a cache copy.
+  useServerConfig('config-halfyear-ranges', data => {
+    if (!data || typeof data !== 'object') return;
+    const r = { ...DEFAULT_RANGES, ...(data as Partial<HalfRanges>) };
+    setRangesState(r);
+    try { localStorage.setItem(RANGES_KEY, JSON.stringify(r)); } catch { /* ignore */ }
+  });
+  useServerConfig('config-team-periods', data => {
+    if (!data || typeof data !== 'object') return;
+    setTeamMap({ ...SEED_TEAM_PERIODS, ...(data as Record<string, Period>) });
+    try { localStorage.setItem(TEAM_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+  });
+
   const setRanges = useCallback((r: HalfRanges) => {
     setRangesState(r);
     try { localStorage.setItem(RANGES_KEY, JSON.stringify(r)); } catch { /* ignore */ }
+    sharedStore.set('config-halfyear-ranges', r);
   }, []);
   const setActive = useCallback((p: Period) => {
     userPicked.current = true;
@@ -145,6 +162,7 @@ export function HalfYearProvider({ children }: { children: ReactNode }) {
         const persistable: Record<string, Period> = {};
         Object.keys(next).forEach(k => { if (!(k in SEED_TEAM_PERIODS) || !samePeriod(next[k], SEED_TEAM_PERIODS[k])) persistable[k] = next[k]; });
         localStorage.setItem(TEAM_KEY, JSON.stringify(persistable));
+        sharedStore.set('config-team-periods', persistable);
       } catch { /* ignore */ }
       return next;
     });

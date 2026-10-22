@@ -7,6 +7,7 @@ import {
   Medal, Trophy, BadgeCheck, CircleDot, ArrowUpDown
 } from 'lucide-react';
 import { useConfirm } from './ConfirmDialog';
+import { sharedStore } from '../lib/sharedStore';
 
 /* ───────── Types ───────── */
 interface ProblemIdentificationProps {
@@ -50,13 +51,9 @@ interface SavedState {
   themeAccepted: boolean;
 }
 
+// Saved on the server (shared by every PC); loaded before this step mounts.
 function readSaved(key: string): SavedState | null {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as SavedState) : null;
-  } catch {
-    return null;
-  }
+  return sharedStore.get<SavedState>(key);
 }
 
 /* ───────── Constants ───────── */
@@ -146,8 +143,8 @@ const evalRatingLabel = (rank: number): { label: string; icon: React.ReactNode; 
 export default function ProblemIdentification({ projectId, teamName, teamMembers }: ProblemIdentificationProps) {
   /* ── Persistence: everything typed here survives navigating away and back.
         Data is only removed when the user explicitly deletes a row. ── */
-  const storageKey = `qcc-problem-identification-${projectId || 'default'}`;
-  const saved = useRef<SavedState | null>(readSaved(storageKey)).current;
+  const storageKey = `step-theme/${projectId || 'default'}`;
+  const [saved] = useState<SavedState | null>(() => readSaved(storageKey));
   const askConfirm = useConfirm();
 
   /* ── Member Selection State ── */
@@ -156,21 +153,9 @@ export default function ProblemIdentification({ projectId, teamName, teamMembers
   );
 
   /* ── Table: Dynamic Scoring Table ── */
-  const [points, setPoints] = useState<ImprovementPoint[]>(() => {
-    if (saved?.points?.length) return saved.points;
-    // Start every point UNRATED ('-'). Cumulative / Avg / Rank are then driven purely by
-    // what the members actually select (the allowed scale is '-', 1, 3, 9).
-    const unrated = () =>
-      Object.fromEntries(teamMembers.map(m => [m.id, '-'])) as Record<string, number | string>;
-    return [
-      { id: uid(), sr: 1, description: 'Reduce weld defect rate from 3.2% to below 1%', scores: unrated() },
-      { id: uid(), sr: 2, description: 'Improve CNC machine setup time by 40%', scores: unrated() },
-      { id: uid(), sr: 3, description: 'Reduce material wastage in paint shop', scores: unrated() },
-      { id: uid(), sr: 4, description: 'Eliminate assembly line bottlenecks', scores: unrated() },
-      { id: uid(), sr: 5, description: 'Improve first-pass yield to 98%', scores: unrated() },
-      { id: uid(), sr: 6, description: 'Reduce energy consumption in HVAC system', scores: unrated() },
-    ];
-  });
+  // A new project starts with no points — the team enters its own candidate themes
+  // (sample themes used to be pre-filled here and ended up in real reports).
+  const [points, setPoints] = useState<ImprovementPoint[]>(() => saved?.points ?? []);
   const [newText, setNewText] = useState('');
   const [flashId, setFlashId] = useState<string | null>(null);
 
@@ -194,7 +179,7 @@ export default function ProblemIdentification({ projectId, teamName, teamMembers
         points, evalMatrix, selectedMemberIds, selectedThemeId,
         chooseDifferent, differentReason, themeAccepted,
       };
-      try { localStorage.setItem(storageKey, JSON.stringify(payload)); } catch { /* quota */ }
+      sharedStore.set(storageKey, payload);
     }, 600);
     return () => clearTimeout(timer);
   }, [storageKey, points, evalMatrix, selectedMemberIds, selectedThemeId, chooseDifferent, differentReason, themeAccepted]);
