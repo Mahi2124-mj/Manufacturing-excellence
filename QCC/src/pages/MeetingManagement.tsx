@@ -10,6 +10,7 @@ import { useAuth } from '../lib/auth';
 import { useMeetingSchedules, computeScheduleDate } from '../lib/meetingSchedules';
 import { useActivitySteps } from '../lib/activitySteps';
 import { useHierarchy } from '../lib/hierarchy';
+import { useHalfYear } from '../lib/halfYear';
 import { loadClosure, CLOSURE_KEY } from '../components/FinalProjectClosure';
 import { sharedStore } from '../lib/sharedStore';
 import type { Team, QCCProject } from '../types';
@@ -137,6 +138,7 @@ export default function MeetingManagement() {
   const { schedules } = useMeetingSchedules();      // published schedules from Admin → Create Meeting Schedule
   const { workflowSteps } = useActivitySteps();     // for "Actual Step"
   const hierarchy = useHierarchy();
+  const hy = useHalfYear();   // only the selected QCC cycle's teams and meetings show
 
   const [teams, setTeams] = useState<Team[]>([]);
   const [projects, setProjects] = useState<QCCProject[]>([]);
@@ -304,7 +306,8 @@ export default function MeetingManagement() {
       };
     };
 
-    const teamById = new Map(teams.map(t => [t.id, t]));
+    const periodTeams = teams.filter(t => hy.isTeamActive(t.id, t.createdAt));
+    const teamById = new Map(periodTeams.map(t => [t.id, t]));
     const rows: MeetingRow[] = [];
     const scheduledTeams = new Set<string>();
 
@@ -322,7 +325,7 @@ export default function MeetingManagement() {
     });
 
     // 2) Active teams without a published schedule → default auto meeting.
-    teams.filter(t => t.status === 'active' && !scheduledTeams.has(t.id)).forEach((team, i) => {
+    periodTeams.filter(t => t.status === 'active' && !scheduledTeams.has(t.id)).forEach((team, i) => {
       const sched = mockMeetingSchedules.find(sc => sc.teamIds.includes(team.id));
       const d = new Date(today); d.setDate(d.getDate() + OFFSETS[i % OFFSETS.length]);
       rows.push(makeRow(`MTG-${team.id}`, team, isoOf(d), {
@@ -334,7 +337,7 @@ export default function MeetingManagement() {
     });
 
     return rows;
-  }, [teams, exec, schedules, projects, workflowSteps, closureDocs]);
+  }, [teams, exec, schedules, projects, workflowSteps, closureDocs, hy]);
 
   // ── Role scoping ──
   const visibleMeetings = useMemo(() => {

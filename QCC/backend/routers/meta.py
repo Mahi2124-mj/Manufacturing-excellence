@@ -5,13 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from database import get_db
-from deps import get_current_user
-from models import Department, SubDepartment, Team, Project, Cycle, User
-from schemas import DepartmentOut, SubDepartmentOut, CycleOut, CycleCreate, CycleUpdate
+from deps import get_current_user, require_roles
+from models import Department, SubDepartment, Team, Project, Cycle, User, AuditLog
+from routers.teams import remove_team, remove_stored_files
+from schemas import DepartmentOut, SubDepartmentOut, CycleOut, CycleCreate, CycleUpdate, CycleDelete
 
 router = APIRouter(prefix="/api", tags=["meta"])
 
-MAX_CYCLES_PER_YEAR = 2   # a QCC year has two cycles (H1 and H2)
+MAX_CYCLES_PER_YEAR = 2   # a QCC year runs two cycles, one after the other
 
 
 @router.get("/departments", response_model=list[DepartmentOut])
@@ -84,9 +85,37 @@ def update_cycle(cycle_id: str, body: CycleUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/cycles/{cycle_id}")
-def delete_cycle(cycle_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_cycle(cycle_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    """Admin only: remove just the cycle (its teams stay, outside every cycle)."""
     cycle = db.query(Cycle).filter(Cycle.id == cycle_id).first()
     if cycle:
         db.delete(cycle)
         db.commit()
     return {"ok": True}
+
+
+@router.post("/cycles/{cycle_id}/delete")
+def delete_cycle_with_data(cycle_id: str, body: CycleDelete, db: Session = Depends(get_db),
+                           user: User = Depends(require_roles("admin"))):
+    """Admin only: delete a cycle together with its data — each of its teams (the ones the
+    app shows under this cycle, sent as teamIds) with their projects, workflow steps,
+    actions, approvals, meetings, saved step sheets and uploaded files. All or nothing."""
+    cycle = db.get(Cycle, cycle_id)
+    if not cycle:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
+    deleted, stored = [], []
+    for team_id in dict.fromkeys(body.team_ids):
+        team = db.get(Team, team_id)
+        if team:
+            stored += remove_team(db, team, user)
+            deleted.append(team_id)
+    db.add(AuditLog(
+        entity_type="cycle", entity_id=cycle_id, action="deleted",
+        notes=f"Cycle '{cycle.name}' ({cycle.start_date} – {cycle.end_date}) deleted with "
+              f"{len(deleted)} team(s): {', '.join(deleted) or 'none'}",
+        performed_by=user.id, performed_by_name=user.name, performed_by_role=user.role,
+    ))
+    db.delete(cycle)
+    db.commit()
+    remove_stored_files(stored)
+    return {"ok": True, "deletedTeams": deleted}

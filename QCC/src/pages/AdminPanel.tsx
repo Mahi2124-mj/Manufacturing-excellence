@@ -10,8 +10,8 @@ import { mockDepartments, DEPARTMENTS, mockSubDepartments } from '../lib/data';
 import { ROLE_LABELS, ROLE_COLORS, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { formatDateTime } from '../lib/format';
-import { useHalfYear, halfWith } from '../lib/halfYear';
-import { useCycles, MAX_CYCLES_PER_YEAR } from '../lib/cycles';
+import { useHalfYear } from '../lib/halfYear';
+import { useCycles, cycleHalf, MAX_CYCLES_PER_YEAR } from '../lib/cycles';
 import { useActivitySteps } from '../lib/activitySteps';
 import { useHierarchy } from '../lib/hierarchy';
 import type { User, UserRole, SubDepartment, Team, QCCProject, TeamChangeRequest } from '../types';
@@ -267,29 +267,52 @@ export default function AdminPanel() {
   };
 
   // Create a QCC cycle → it saves, becomes active, and its year appears in the header period dropdown.
-  // A QCC year runs two cycles (one per half), so a year takes at most two.
+  // A QCC year runs two cycles, one after the other; their dates are free to choose.
   const handleCreateCycle = () => {
     const year = parseInt((cycleForm.startDate || '').slice(0, 4), 10);
     if (!cycleForm.name.trim() || !cycleForm.startDate || !Number.isFinite(year)) {
       setCycleMsg('Enter cycle name and valid date'); setTimeout(() => setCycleMsg(null), 3500); return;
     }
     if (cycles.filter(c => c.year === year).length >= MAX_CYCLES_PER_YEAR) {
-      setCycleMsg(`${year} already has ${MAX_CYCLES_PER_YEAR} cycles`);
+      setCycleMsg(`${year} already has its ${MAX_CYCLES_PER_YEAR} cycles`);
       setTimeout(() => setCycleMsg(null), 7000); return;
     }
     const created = createCycle({ name: cycleForm.name, startDate: cycleForm.startDate, endDate: cycleForm.endDate, maxTeams: Number(cycleForm.maxTeams) || 20 });
     if (!created) { setCycleMsg('Enter cycle name and start date'); setTimeout(() => setCycleMsg(null), 3000); return; }
-    // Switch the app to the new cycle's period (the half its start date falls in).
-    hy.setActive({ year: created.year, half: halfWith(hy.ranges, created.startDate) });
+    // Switch the whole app to the new cycle: it opens empty, older cycles' data is hidden.
+    hy.setActive({ year: created.year, half: cycleHalf(created, [...cycles, created]) });
     setCycleForm({ name: '', startDate: '', endDate: '', maxTeams: '' });
     setCycleMsg(null);
     setShowCycleForm(false);
   };
 
+  // Deleting a cycle deletes its data too: every team the app shows under it, with their
+  // projects, steps, actions, approvals, meetings, saved sheets and files.
   const handleDeleteCycle = async (id: string, name: string) => {
-    if (await deleteCycle(id)) return;
-    setCycleListMsg(`"${name}" could not be deleted on the server, so it is still there. Please try again.`);
+    const cycleTeams = teams.filter(t => hy.teamCycleId(t.id, t.createdAt) === id);
+    const names = cycleTeams.slice(0, 5).map(t => t.name).join(', ') + (cycleTeams.length > 5 ? ` and ${cycleTeams.length - 5} more` : '');
+    const ok = await askConfirm({
+      title: `Delete cycle "${name}" and its data?`,
+      message: cycleTeams.length
+        ? `${cycleTeams.length} team(s) of this cycle (${names}) will be deleted for good, with their projects, workflow steps, actions, approvals, meetings, saved sheets and uploaded files. This cannot be undone.`
+        : 'This cycle has no teams. It will be removed from the QCC period list. This cannot be undone.',
+      confirmText: cycleTeams.length ? `Delete cycle and ${cycleTeams.length} team(s)` : 'Delete cycle',
+    });
+    if (!ok) return;
+    if (await deleteCycle(id, cycleTeams.map(t => t.id))) {
+      const gone = new Set(cycleTeams.map(t => t.id));
+      setTeams(prev => prev.filter(t => !gone.has(t.id)));
+      setProjects(prev => prev.filter(p => !gone.has(p.teamId)));
+      return;
+    }
+    setCycleListMsg(`"${name}" could not be deleted on the server, so it and its data are still there. Please try again.`);
     setTimeout(() => setCycleListMsg(null), 7000);
+  };
+
+  // Clicking an active cycle's card shows that cycle's data across the app.
+  const showCycle = (id: string, isActive: boolean) => {
+    const p = hy.cyclePeriod(id);
+    if (isActive && p) hy.setActive(p);
   };
 
   const tabs: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
@@ -765,8 +788,8 @@ export default function AdminPanel() {
               <p className="text-[11px] text-slate-500 mt-3 flex items-start gap-1.5">
                 <Calendar size={13} className="text-blue-500 mt-0.5 flex-shrink-0" />
                 {cycleForm.startDate
-                  ? <span>This creates the <b className="text-slate-700">{(cycleForm.startDate || '').slice(0, 4)}</b> cycle. It opens <b>empty</b> — register or import teams into it. Teams are grouped by year, so old years' teams never carry over.</span>
-                  : <span>Pick a start date — its <b>year</b> identifies the cycle. A year has up to {MAX_CYCLES_PER_YEAR} cycles (one per half); each new year starts fresh with no old teams.</span>}
+                  ? <span>This creates the <b className="text-slate-700">{(cycleForm.startDate || '').slice(0, 4)}</b> cycle. It opens <b>empty</b> and the app switches to it — register or import teams into it. Older cycles' teams and data stay with their own cycle.</span>
+                  : <span>Pick the cycle's dates. A year has up to {MAX_CYCLES_PER_YEAR} cycles, one after the other (e.g. 1 Apr – 5 Jul, then 20 Jul – 30 Nov). A new cycle opens empty — older cycles' teams and data stay with their own cycle.</span>}
               </p>
               {cycleMsg && <p className="text-xs text-red-600 mt-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{cycleMsg}</p>}
               <div className="flex justify-end gap-2 mt-4">
@@ -779,26 +802,34 @@ export default function AdminPanel() {
           {cycleListMsg && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{cycleListMsg}</p>}
           {cycles.length === 0 && <p className="text-sm text-slate-500 bg-white border border-slate-200 rounded-xl px-5 py-6 text-center">No QCC cycles yet — use Create Cycle to add one.</p>}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {cycles.map(cycle => (
-              <div key={cycle.id} className={`bg-white rounded-xl p-5 shadow-sm border ${cycle.isActive ? 'border-emerald-300 ring-1 ring-emerald-100' : 'border-slate-200'}`}>
+            {cycles.map(cycle => {
+              const cp = hy.cyclePeriod(cycle.id);
+              const showing = cycle.isActive && !!cp && cp.year === hy.active.year && cp.half === hy.active.half;
+              const cycleTeamCount = teams.filter(t => hy.teamCycleId(t.id, t.createdAt) === cycle.id).length;
+              return (
+              <div key={cycle.id}
+                onClick={() => showCycle(cycle.id, cycle.isActive)}
+                title={cycle.isActive ? "Click to show this cycle's data across the app" : 'Inactive — activate it to show its data'}
+                className={`bg-white rounded-xl p-5 shadow-sm border transition-shadow ${cycle.isActive ? 'cursor-pointer hover:shadow-md' : 'opacity-70'} ${showing ? 'border-blue-400 ring-2 ring-blue-200' : cycle.isActive ? 'border-emerald-300 ring-1 ring-emerald-100' : 'border-slate-200'}`}>
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <div className="flex items-center gap-2.5">
                       <span className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center flex-shrink-0"><RefreshCw size={16} /></span>
                       <h3 className="text-sm font-bold text-slate-800">{cycle.name}</h3>
+                      {showing && <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700">Showing</span>}
                     </div>
                     <p className="text-xs text-slate-500 mt-0.5">Year: {cycle.year}</p>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <button
-                      onClick={() => setCycleActive(cycle.id, !cycle.isActive)}
+                      onClick={e => { e.stopPropagation(); setCycleActive(cycle.id, !cycle.isActive); }}
                       title={cycle.isActive ? 'Active — showing in the header QCC-period dropdown. Click to hide it.' : 'Inactive — hidden from the header QCC-period dropdown. Click to show it.'}
                       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-colors ${cycle.isActive ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
                     >
                       <span className={`w-1.5 h-1.5 rounded-full ${cycle.isActive ? 'bg-emerald-500' : 'bg-slate-400'}`} />
                       {cycle.isActive ? 'Active' : 'Inactive'}
                     </button>
-                    <button onClick={async () => { if (await askConfirm({ title: 'Delete cycle?', message: `Delete "${cycle.name}"? Its QCC period will be removed.`, confirmText: 'Delete' })) handleDeleteCycle(cycle.id, cycle.name); }} title="Delete cycle" className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"><Trash2 size={14} /></button>
+                    <button onClick={e => { e.stopPropagation(); void handleDeleteCycle(cycle.id, cycle.name); }} title="Delete cycle" className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"><Trash2 size={14} /></button>
                   </div>
                 </div>
                 <div className="space-y-2 text-xs text-slate-600">
@@ -812,20 +843,20 @@ export default function AdminPanel() {
                   </div>
                   <div className="flex justify-between">
                     <span>Registered Teams</span>
-                    <span className="font-medium">{teams.length}</span>
+                    <span className="font-medium">{cycleTeamCount}</span>
                   </div>
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-100">
                   <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
                     <span>Capacity</span>
-                    <span>{Math.round((teams.length / cycle.maxTeams) * 100)}%</span>
+                    <span>{Math.round((cycleTeamCount / cycle.maxTeams) * 100)}%</span>
                   </div>
                   <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-500 rounded-full" style={{ width: `${Math.min(100, (teams.length / cycle.maxTeams) * 100)}%` }} />
+                    <div className="h-full bg-blue-500 rounded-full" style={{ width: `${Math.min(100, (cycleTeamCount / cycle.maxTeams) * 100)}%` }} />
                   </div>
                 </div>
               </div>
-            ))}
+            ); })}
           </div>
         </div>
       )}

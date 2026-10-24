@@ -203,14 +203,12 @@ def update_team(
     return {"applied": False, "changeRequestId": cr_id, "message": "Change sent to Admin for approval"}
 
 
-@router.delete("/{team_id}")
-def delete_team(team_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))):
-    """Admin only: remove a team for good, together with its QCC project(s) and everything
-    recorded for them — workflow steps, actions, approvals, meetings, saved step sheets
-    and uploaded step documents. The audit log keeps a line saying who deleted it."""
-    team = db.get(Team, team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
+def remove_team(db: Session, team: Team, user: User) -> list[str]:
+    """Delete a team with its QCC project(s) and everything recorded for them — workflow
+    steps, actions, approvals, meetings, saved step sheets and uploaded step documents —
+    and write an audit-log line. Does not commit; returns the uploaded files to remove
+    from disk once the caller has committed."""
+    team_id = team.id
     project_ids = [pid for (pid,) in db.query(Project.id).filter(Project.team_id == team_id)]
     stored = [f.stored_name for f in db.query(StoredFile).filter(StoredFile.project_id.in_(project_ids))]
     for model in (WorkflowStep, ActionItem, Approval, Meeting, StoredFile):
@@ -226,12 +224,27 @@ def delete_team(team_id: str, db: Session = Depends(get_db), user: User = Depend
         performed_by=user.id, performed_by_name=user.name, performed_by_role=user.role,
     ))
     db.delete(team)   # its members go with it (delete-orphan)
-    db.commit()
-    for name in stored:
+    return stored
+
+
+def remove_stored_files(names: list[str]) -> None:
+    for name in names:
         try:
             os.remove(os.path.join(UPLOAD_DIR, name))
         except OSError:
             pass
+
+
+@router.delete("/{team_id}")
+def delete_team(team_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))):
+    """Admin only: remove a team for good, with everything recorded for it (remove_team)."""
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    project_ids = [pid for (pid,) in db.query(Project.id).filter(Project.team_id == team_id)]
+    stored = remove_team(db, team, user)
+    db.commit()
+    remove_stored_files(stored)
     return {"ok": True, "deletedProjects": project_ids}
 
 

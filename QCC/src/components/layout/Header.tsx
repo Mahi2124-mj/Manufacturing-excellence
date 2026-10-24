@@ -43,7 +43,7 @@ const PAGE_TITLES: Record<string, string> = {
 };
 
 // Pages that do not show the QCC period picker (they are not scoped to a period).
-const NO_PERIOD_PAGES = ['/admin', '/settings'];
+const NO_PERIOD_PAGES = ['/settings'];
 
 export default function Header({ onMenuClick }: HeaderProps) {
   const { user } = useAuth();
@@ -87,32 +87,41 @@ export default function Header({ onMenuClick }: HeaderProps) {
       const p = projects.find(x => x.id === projectId);
       return teams.find(t => t.id === p?.teamId)?.name || p?.title || projectId;
     };
+    // Only the selected QCC cycle's records: a new cycle starts without old notifications.
+    const projectInPeriod = (projectId: string) => {
+      const p = projects.find(x => x.id === projectId);
+      return !!p && hy.isProjectActive(p.teamId, p.startedAt);
+    };
+    const teamInPeriod = (teamId: string) => {
+      const t = teams.find(x => x.id === teamId);
+      return !!t && hy.isTeamActive(t.id, t.createdAt);
+    };
     const stepName = (n: number) => `Step ${n}${workflowSteps[n - 1] ? ` (${workflowSteps[n - 1].title})` : ''}`;
     const since = new Date(Date.now() - RECENT_DAYS * 86400000).toISOString();
     const list: Notif[] = [];
     if (APPROVER_ROLES.includes(user.role)) {
-      approvals.filter(a => a.status === 'pending').forEach(a => list.push({
+      approvals.filter(a => a.status === 'pending' && projectInPeriod(a.projectId)).forEach(a => list.push({
         id: `apr-p-${a.id}`, title: 'New Approval Request', type: 'warning', to: '/approvals', createdAt: a.requestedAt || '',
         message: `${teamOf(a.projectId)} submitted ${stepName(a.stepNumber)} for review.`,
       }));
     }
-    approvals.filter(a => a.status !== 'pending' && (a.reviewedAt || '') >= since).forEach(a => list.push({
+    approvals.filter(a => a.status !== 'pending' && (a.reviewedAt || '') >= since && projectInPeriod(a.projectId)).forEach(a => list.push({
       id: `apr-d-${a.id}`, to: '/workflow', createdAt: a.reviewedAt || '',
       title: a.status === 'approved' ? 'Step Approved' : a.status === 'rework' ? 'Rework Requested' : 'Step Rejected',
       type: a.status === 'approved' ? 'success' : 'error',
       message: `${stepName(a.stepNumber)} of ${teamOf(a.projectId)} was ${a.status === 'rework' ? 'sent back for rework' : a.status}.${a.comments ? ` "${a.comments}"` : ''}`,
     }));
-    actions.filter(a => a.status === 'overdue').forEach(a => list.push({
+    actions.filter(a => a.status === 'overdue' && projectInPeriod(a.projectId)).forEach(a => list.push({
       id: `act-${a.id}`, title: 'Action Overdue', type: 'error', to: '/actions', createdAt: a.dueDate || '',
       message: `${a.title} (${teamOf(a.projectId)}) was due ${formatDate(a.dueDate)}.`,
     }));
     if (user.role === 'admin') {
-      changeRequests.filter(c => c.status === 'pending').forEach(c => list.push({
+      changeRequests.filter(c => c.status === 'pending' && teamInPeriod(c.teamId)).forEach(c => list.push({
         id: `cr-p-${c.id}`, title: 'Team Change Request', type: 'warning', to: '/admin', adminTab: 'changeRequests', createdAt: c.requestedAt || '',
         message: `${c.requestedByName || 'A user'} wants to change ${c.teamName || c.teamId}.`,
       }));
     } else {
-      changeRequests.filter(c => c.status !== 'pending' && (c.reviewedAt || '') >= since).forEach(c => list.push({
+      changeRequests.filter(c => c.status !== 'pending' && (c.reviewedAt || '') >= since && teamInPeriod(c.teamId)).forEach(c => list.push({
         id: `cr-d-${c.id}`, to: '/team-registration', createdAt: c.reviewedAt || '',
         title: c.status === 'approved' ? 'Team Change Approved' : 'Team Change Rejected',
         type: c.status === 'approved' ? 'success' : 'error',
@@ -125,7 +134,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
       .map(n => ({ ...n, read: read.includes(n.id) }))
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
       .slice(0, 30));
-  }, [user, workflowSteps, readKey]);
+  }, [user, workflowSteps, readKey, hy]);
 
   // Refresh when the dashboard (where the bell lives) is opened.
   useEffect(() => { if (location.pathname === '/') loadNotifications(); }, [location.pathname, loadNotifications]);
@@ -173,9 +182,20 @@ export default function Header({ onMenuClick }: HeaderProps) {
             <Menu size={20} />
           </button>
 
-          {/* Global QCC period scope (year + half), on every page except Admin Panel and
-              Settings. The choice is remembered and every page follows it. */}
-          {!NO_PERIOD_PAGES.includes(location.pathname) && (
+          {/* Global QCC period scope (one QCC cycle), on every page except Settings.
+              The choice is remembered and every page follows it. */}
+          {/* No cycle left (all deleted): say so instead of offering a period that does not exist. */}
+          {!NO_PERIOD_PAGES.includes(location.pathname) && hy.periods.length === 0 && (
+            <button
+              type="button"
+              onClick={() => { if (user.role !== 'admin') return; try { localStorage.setItem('qcc-admin-tab', 'cycles'); } catch { /* ignore */ } navigate('/admin'); }}
+              title={user.role === 'admin' ? 'Create a QCC cycle in Admin Panel → QCC Cycles' : 'Ask the QCC Admin to create a QCC cycle'}
+              className={`flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs sm:text-sm font-semibold text-amber-700 ${user.role === 'admin' ? 'hover:bg-amber-100' : 'cursor-default'}`}
+            >
+              <CalendarRange size={15} className="flex-shrink-0" /> No QCC cycle
+            </button>
+          )}
+          {!NO_PERIOD_PAGES.includes(location.pathname) && hy.periods.length > 0 && (
           <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 pl-2 pr-1.5 py-1" title="QCC period — sets the data shown across the whole app">
             <CalendarRange size={15} className="text-blue-600 flex-shrink-0" />
             <select
@@ -184,7 +204,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
               className="bg-transparent text-xs sm:text-sm font-semibold text-slate-700 outline-none cursor-pointer"
             >
               {hy.periods.map(p => (
-                <option key={`${p.year}|${p.half}`} value={`${p.year}|${p.half}`}>QCC {p.year} · {hy.labelHalf(p.half)}</option>
+                <option key={`${p.year}|${p.half}`} value={`${p.year}|${p.half}`}>QCC {p.year} · {hy.labelHalf(p.half, p.year)}</option>
               ))}
             </select>
           </div>

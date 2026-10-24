@@ -146,7 +146,7 @@ export default function TeamRegistration() {
   const periodCreatedAt = (): string => {
     const d = new Date();
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return hy.isActive(today) ? today : `${hy.active.year}-${hy.ranges[hy.active.half].start}`;
+    return hy.isActive(today) ? today : hy.periodRange(hy.active).start;
   };
   // Non-admins only see teams they are named on (backend scopes by name; the leader
   // list narrows further to their own teams), so a team registered for someone else

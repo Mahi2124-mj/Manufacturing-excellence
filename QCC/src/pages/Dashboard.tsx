@@ -186,9 +186,10 @@ export default function Dashboard() {
   // Month by month across the selected QCC period: projects running in that month, and
   // projects that finished in it (the date their last workflow step was approved).
   const monthlyTrend = useMemo(() => {
-    const { year, half } = hy.active;
-    const startM = parseInt(hy.ranges[half].start.slice(0, 2), 10) || 1;
-    const endM = parseInt(hy.ranges[half].end.slice(0, 2), 10) || 12;
+    const { year } = hy.active;
+    const range = hy.periodRange(hy.active);   // the selected cycle's own dates
+    const startM = parseInt(range.start.slice(5, 7), 10) || 1;
+    const endM = parseInt(range.end.slice(5, 7), 10) || 12;
     const finishedOn = (p: QCCProject) => (p.status === 'completed'
       ? ([...p.steps.map(s => (s.completedAt || '').slice(0, 10))].sort().pop() || (p.targetCompletion || '').slice(0, 10))
       : '');
@@ -201,7 +202,7 @@ export default function Dashboard() {
         completions: hyProjects.filter(p => { const f = finishedOn(p); return !!f && f >= from && f <= to; }).length,
       };
     });
-  }, [hyProjects, hy.active, hy.ranges]);
+  }, [hyProjects, hy]);
 
   const statusDistribution = [
     { name: 'In Progress', value: hyProjects.filter(p => p.status === 'in_progress').length, color: '#3b82f6' },

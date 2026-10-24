@@ -227,6 +227,9 @@ export const api = {
   updateCycle: (id: string, body: { isActive?: boolean; name?: string }) =>
     request<QCCCycleConfig>(`/api/cycles/${id}`, { method: 'PATCH', body }),
   deleteCycle: (id: string) => request<{ ok: boolean }>(`/api/cycles/${id}`, { method: 'DELETE' }),
+  // Admin only: deletes the cycle together with the given teams (its teams) and all their data.
+  deleteCycleWithData: (id: string, teamIds: string[]) =>
+    request<{ ok: boolean; deletedTeams: string[] }>(`/api/cycles/${encodeURIComponent(id)}/delete`, { method: 'POST', body: { teamIds } }),
 
   // dashboard
   dashboardStats: () => request<DashboardStats>('/api/dashboard/stats'),

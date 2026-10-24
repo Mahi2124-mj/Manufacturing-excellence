@@ -124,7 +124,8 @@ export default function CreateMeetingSchedule() {
   // Common Week + Time applied to every team when you click a day (editable at the top).
   const [bulkWeek, setBulkWeek] = useState('Every');
   const [bulkTime, setBulkTime] = useState('09:00');
-  const activeTeams = useMemo(() => teams.filter(t => t.status === 'active'), [teams]);
+  // Schedules are made for the selected QCC cycle's teams only.
+  const activeTeams = useMemo(() => teams.filter(t => t.status === 'active' && hy.isTeamActive(t.id, t.createdAt)), [teams, hy]);
   const dayChecked = (teamId: string, day: string) =>
     schedules.some(s => s.teamId === teamId && s.meetingDay === day && s.status !== 'cancelled');
   const toggleDay = (teamId: string, day: string) => {

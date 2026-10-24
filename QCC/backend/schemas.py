@@ -275,6 +275,10 @@ class CycleCreate(CamelModel):
     max_teams: int = 20
 
 
+class CycleDelete(CamelModel):
+    team_ids: list[str] = []   # the cycle's teams (as the app shows them), deleted with it
+
+
 class CycleUpdate(CamelModel):
     is_active: Optional[bool] = None
     name: Optional[str] = None
