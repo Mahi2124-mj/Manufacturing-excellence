@@ -42,6 +42,7 @@ export default function AdminPanel() {
   const { cycles, createCycle, deleteCycle, setCycleActive } = useCycles();
   const [cycleForm, setCycleForm] = useState({ name: '', startDate: '', endDate: '', maxTeams: '' });
   const [cycleMsg, setCycleMsg] = useState<string | null>(null);
+  const [cycleListMsg, setCycleListMsg] = useState<string | null>(null);   // a delete the server refused
 
   // System Settings — persisted so "Save" actually stores the configuration.
   const SYS_KEY = 'qcc-system-settings';
@@ -283,6 +284,12 @@ export default function AdminPanel() {
     setCycleForm({ name: '', startDate: '', endDate: '', maxTeams: '' });
     setCycleMsg(null);
     setShowCycleForm(false);
+  };
+
+  const handleDeleteCycle = async (id: string, name: string) => {
+    if (await deleteCycle(id)) return;
+    setCycleListMsg(`"${name}" could not be deleted on the server, so it is still there. Please try again.`);
+    setTimeout(() => setCycleListMsg(null), 7000);
   };
 
   const tabs: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
@@ -769,6 +776,8 @@ export default function AdminPanel() {
             </div>
           )}
 
+          {cycleListMsg && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{cycleListMsg}</p>}
+          {cycles.length === 0 && <p className="text-sm text-slate-500 bg-white border border-slate-200 rounded-xl px-5 py-6 text-center">No QCC cycles yet — use Create Cycle to add one.</p>}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {cycles.map(cycle => (
               <div key={cycle.id} className={`bg-white rounded-xl p-5 shadow-sm border ${cycle.isActive ? 'border-emerald-300 ring-1 ring-emerald-100' : 'border-slate-200'}`}>
@@ -789,7 +798,7 @@ export default function AdminPanel() {
                       <span className={`w-1.5 h-1.5 rounded-full ${cycle.isActive ? 'bg-emerald-500' : 'bg-slate-400'}`} />
                       {cycle.isActive ? 'Active' : 'Inactive'}
                     </button>
-                    <button onClick={async () => { if (await askConfirm({ title: 'Delete cycle?', message: `Delete "${cycle.name}"? Its QCC period will be removed.`, confirmText: 'Delete' })) deleteCycle(cycle.id); }} title="Delete cycle" className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"><Trash2 size={14} /></button>
+                    <button onClick={async () => { if (await askConfirm({ title: 'Delete cycle?', message: `Delete "${cycle.name}"? Its QCC period will be removed.`, confirmText: 'Delete' })) handleDeleteCycle(cycle.id, cycle.name); }} title="Delete cycle" className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"><Trash2 size={14} /></button>
                   </div>
                 </div>
                 <div className="space-y-2 text-xs text-slate-600">

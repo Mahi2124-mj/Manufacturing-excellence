@@ -42,6 +42,9 @@ const PAGE_TITLES: Record<string, string> = {
   '/settings': 'Settings',
 };
 
+// Pages that do not show the QCC period picker (they are not scoped to a period).
+const NO_PERIOD_PAGES = ['/admin', '/settings'];
+
 export default function Header({ onMenuClick }: HeaderProps) {
   const { user } = useAuth();
   const hy = useHalfYear();
@@ -170,10 +173,9 @@ export default function Header({ onMenuClick }: HeaderProps) {
             <Menu size={20} />
           </button>
 
-          {/* Global QCC period scope (year + half). Chosen on the Dashboard only — the
-              choice is remembered and every other page follows it, so the period cannot
-              be changed halfway through a workflow by accident. */}
-          {location.pathname === '/' && (
+          {/* Global QCC period scope (year + half), on every page except Admin Panel and
+              Settings. The choice is remembered and every page follows it. */}
+          {!NO_PERIOD_PAGES.includes(location.pathname) && (
           <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 pl-2 pr-1.5 py-1" title="QCC period — sets the data shown across the whole app">
             <CalendarRange size={15} className="text-blue-600 flex-shrink-0" />
             <select

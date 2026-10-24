@@ -208,13 +208,10 @@ export default function Reports() {
   const avgImpactScore = projects.length ? Math.round(projects.reduce((s, p) => s + (p.impactScore || 0), 0) / projects.length) : 0;
   const activeTeams = teams.filter(t => t.status === 'active').length;
 
-  // Picks which report the Export button downloads.
+  // Picks which report the Export button downloads. Only the overview is offered here;
+  // the other reports stay downloadable from "Available Reports" below.
   const reportTypes = [
     { id: 'overview', label: 'Overview Report' },
-    { id: 'department', label: 'Department Report' },
-    { id: 'team', label: 'Team Performance' },
-    { id: 'financial', label: 'Financial Impact' },
-    { id: 'actions', label: 'Action Items' },
   ];
 
   return (

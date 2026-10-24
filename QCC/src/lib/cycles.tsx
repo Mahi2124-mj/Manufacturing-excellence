@@ -17,18 +17,15 @@ import { api } from './api';
 const STORAGE_KEY = 'qcc-cycles';
 export const MAX_CYCLES_PER_YEAR = 2;   // a QCC year has two cycles (H1 and H2)
 
-// Fallback used only before the backend responds (or if it is unreachable). The
-// real list always comes from the DB — see the mount effect below.
-const DEFAULT_CYCLES: QCCCycleConfig[] = [
-  { id: 'cyc-2026', name: 'QCC 2026', year: 2026, startDate: '2026-04-01', endDate: '2026-11-02', maxTeams: 40, isActive: true },
-];
-
+// The last list this browser saw, shown until the backend answers. An empty list is a
+// real answer (every cycle deleted), so it is kept as empty — no built-in default cycle
+// may reappear after the admin deleted them all.
 function loadCache(): QCCCycleConfig[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return p as QCCCycleConfig[]; }
+    if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p as QCCCycleConfig[]; }
   } catch { /* fall through */ }
-  return DEFAULT_CYCLES;
+  return [];
 }
 function saveCache(list: QCCCycleConfig[]): void {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch { /* ignore */ }
@@ -38,7 +35,7 @@ interface Ctx {
   cycles: QCCCycleConfig[];
   cycleYears: number[];                       // distinct ACTIVE-cycle years, newest first — drives the period dropdown
   createCycle: (data: { name: string; startDate: string; endDate: string; maxTeams: number }) => QCCCycleConfig | null;
-  deleteCycle: (id: string) => void;
+  deleteCycle: (id: string) => Promise<boolean>;   // false = the server refused, the cycle is back
   setCycleActive: (id: string, active: boolean) => void;  // independent on/off — off = hidden from the header dropdown
 }
 
@@ -52,7 +49,7 @@ export function CyclesProvider({ children }: { children: ReactNode }) {
   // Backend is the source of truth — load the persisted cycles on mount.
   useEffect(() => {
     api.listCycles()
-      .then(list => { if (Array.isArray(list) && list.length) commit(list); })
+      .then(list => { if (Array.isArray(list)) commit(list); })
       .catch(() => { /* offline → keep the cached copy */ });
   }, [commit]);
 
@@ -82,9 +79,17 @@ export function CyclesProvider({ children }: { children: ReactNode }) {
     return entry;
   }, [cycles, commit]);
 
-  const deleteCycle = useCallback((id: string) => {
+  // Removed at once; if the server refuses, the cycle comes back and the caller is told.
+  const deleteCycle = useCallback(async (id: string): Promise<boolean> => {
+    const before = cycles;
     commit(cycles.filter(c => c.id !== id));
-    api.deleteCycle(id).catch(() => { /* best-effort; the optimistic removal already applied */ });
+    try {
+      await api.deleteCycle(id);
+      return true;
+    } catch {
+      commit(before);
+      return false;
+    }
   }, [cycles, commit]);
 
   const setCycleActive = useCallback((id: string, active: boolean) => {

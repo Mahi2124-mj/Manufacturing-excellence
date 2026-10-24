@@ -184,6 +184,9 @@ export const api = {
   listTeams: () => request<Team[]>('/api/teams'),
   getTeam: (id: string) => request<Team>(`/api/teams/${id}`),
   createTeam: (body: Partial<Team>) => request<Team>('/api/teams', { method: 'POST', body }),
+  // Admin only: removes the team with its project(s) and everything recorded for them.
+  deleteTeam: (id: string) =>
+    request<{ ok: boolean; deletedProjects: string[] }>(`/api/teams/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // Admin edits apply at once; anyone else's edit comes back as a pending change request.
   updateTeam: (id: string, body: Partial<Team> & { changeReason?: string }) =>
     request<{ applied: boolean; team?: Team; changeRequestId?: string; message?: string }>(

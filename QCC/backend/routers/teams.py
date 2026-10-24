@@ -5,15 +5,20 @@ Business rule (mirrors TeamRegistration.tsx):
   - non-admins' edits to an existing team become a pending TeamChangeRequest that an
     admin must approve (Admin Panel → Change Requests) before the changes are applied.
 """
+import os
 from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import UPLOAD_DIR, get_db
 from deps import get_current_user, require_roles, accessible_team_ids, can_access_team, can_edit_team_data
-from models import Team, TeamMember, User, TeamChangeRequest
+from models import (
+    Team, TeamMember, User, TeamChangeRequest, Project, WorkflowStep, ActionItem, Approval,
+    Meeting, SharedDoc, StoredFile, AuditLog,
+)
 from routers.projects import create_project_for_team
 from schemas import (
     TeamOut, TeamCreate, TeamUpdate, TeamMemberBase, TeamChangeRequestOut, ChangeRequestDecision,
@@ -196,6 +201,38 @@ def update_team(
     db.add(cr)
     db.commit()
     return {"applied": False, "changeRequestId": cr_id, "message": "Change sent to Admin for approval"}
+
+
+@router.delete("/{team_id}")
+def delete_team(team_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))):
+    """Admin only: remove a team for good, together with its QCC project(s) and everything
+    recorded for them — workflow steps, actions, approvals, meetings, saved step sheets
+    and uploaded step documents. The audit log keeps a line saying who deleted it."""
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    project_ids = [pid for (pid,) in db.query(Project.id).filter(Project.team_id == team_id)]
+    stored = [f.stored_name for f in db.query(StoredFile).filter(StoredFile.project_id.in_(project_ids))]
+    for model in (WorkflowStep, ActionItem, Approval, Meeting, StoredFile):
+        db.query(model).filter(model.project_id.in_(project_ids)).delete(synchronize_session=False)
+    db.query(SharedDoc).filter(
+        or_(SharedDoc.project_id.in_(project_ids), SharedDoc.team_id == team_id)
+    ).delete(synchronize_session=False)
+    db.query(Project).filter(Project.team_id == team_id).delete(synchronize_session=False)
+    db.query(TeamChangeRequest).filter(TeamChangeRequest.team_id == team_id).delete(synchronize_session=False)
+    db.add(AuditLog(
+        entity_type="team", entity_id=team_id, action="deleted",
+        notes=f"Team '{team.name}' deleted with project(s): {', '.join(project_ids) or 'none'}",
+        performed_by=user.id, performed_by_name=user.name, performed_by_role=user.role,
+    ))
+    db.delete(team)   # its members go with it (delete-orphan)
+    db.commit()
+    for name in stored:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, name))
+        except OSError:
+            pass
+    return {"ok": True, "deletedProjects": project_ids}
 
 
 @router.post("/change-requests/{cr_id}/decision", response_model=TeamChangeRequestOut)

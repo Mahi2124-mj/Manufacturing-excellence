@@ -193,6 +193,23 @@ export default function TeamRegistration() {
     setMembers(prev => prev.map(m => (m.deptEdited ? m : { ...m, department: auto })));
   }, [department, subDepartment]);
 
+  // Admin only (the server checks too): the team goes for good, with its project.
+  const deleteTeam = async (team: Team) => {
+    const ok = await askConfirm({
+      title: `Delete team "${team.name}"?`,
+      message: `${team.id} will be removed for good, together with its QCC project, workflow steps, actions, approvals, meetings, saved step sheets and uploaded documents. This cannot be undone.`,
+      confirmText: 'Delete team',
+    });
+    if (!ok) return;
+    try {
+      await api.deleteTeam(team.id);
+      setTeams(prev => prev.filter(t => t.id !== team.id));
+      showToast(`Team ${team.name} deleted`, 'success');
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.message : 'Could not delete the team', 'error');
+    }
+  };
+
   const loadTeamForEdit = (team: Team) => {
     setEditingTeamId(team.id); setChangeReason('');
     setTeamName(team.name); setDepartment(team.department);
@@ -845,6 +862,7 @@ export default function TeamRegistration() {
                 <div className="border-t border-slate-100 px-5 py-2.5 flex items-center gap-1 bg-slate-50/50">
                   <button onClick={() => openDetail(team.id)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 rounded-lg"><Eye size={13} /> View</button>
                   {canEdit && <button onClick={() => loadTeamForEdit(team)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-lg"><Edit2 size={13} /> Edit</button>}
+                  {isAdmin && <button onClick={() => deleteTeam(team)} title="Delete team" className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg"><Trash2 size={13} /> Delete</button>}
                 </div>
               </div>
             );
