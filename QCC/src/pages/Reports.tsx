@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Download, FileSpreadsheet, FileText, ChevronDown, FolderKanban, TrendingUp, Target, Users, BarChart3, Loader2, RefreshCw } from 'lucide-react';
+import { Download, FileSpreadsheet, FileText, ChevronDown, FolderKanban, TrendingUp, Target, Users, BarChart3, RefreshCw } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis
 } from 'recharts';
 import { api, ApiError } from '../lib/api';
 import StatCard, { STAT_GRADIENTS } from '../components/StatCard';
+import HeaderPortal from '../components/layout/HeaderPortal';
 import { loadClosure, CLOSURE_KEY } from '../components/FinalProjectClosure';
 import { sharedStore } from '../lib/sharedStore';
 import { useHalfYear } from '../lib/halfYear';
@@ -46,7 +47,6 @@ function exportExcel(filename: string, headers: string[], rows: (string | number
 
 export default function Reports() {
   const navigate = useNavigate();
-  const [reportType, setReportType] = useState('overview');
   const [exportOpen, setExportOpen] = useState(false);
 
   // Live data — pulled from the same backend Team Registration & Projects write to, so
@@ -148,10 +148,11 @@ export default function Reports() {
     },
   };
 
-  // Export uses the report picked with the report-type buttons.
+  // The header's Export button downloads the overview report; the other reports are
+  // downloaded from "Available Reports" below.
   const handleExport = (format: 'excel' | 'pdf' | 'csv') => {
     setExportOpen(false);
-    const r = REPORTS[reportType] || REPORTS.overview;
+    const r = REPORTS.overview;
     const { headers, rows } = r.build();
     if (format === 'excel') exportExcel(`${r.file}.xls`, headers, rows);
     else if (format === 'csv') exportCSV(`${r.file}.csv`, headers, rows);
@@ -208,26 +209,18 @@ export default function Reports() {
   const avgImpactScore = projects.length ? Math.round(projects.reduce((s, p) => s + (p.impactScore || 0), 0) / projects.length) : 0;
   const activeTeams = teams.filter(t => t.status === 'active').length;
 
-  // Picks which report the Export button downloads. Only the overview is offered here;
-  // the other reports stay downloadable from "Available Reports" below.
-  const reportTypes = [
-    { id: 'overview', label: 'Overview Report' },
-  ];
-
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <div className="flex-1 flex items-center gap-2 text-xs text-slate-500">
-          {loading ? <><Loader2 size={13} className="animate-spin" /> Loading live data…</>
-            : <><span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" /> QCC {hy.active.year} · {hy.labelHalf(hy.active.half)} · {teams.length} teams · {projects.length} projects</>}
-        </div>
-        <div className="relative flex items-center gap-2 justify-end">
-          <button onClick={loadData} title="Refresh" className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-slate-200 text-slate-600 hover:bg-slate-50 text-sm font-medium rounded-lg transition-colors">
+      {/* Refresh + Export sit in the header bar, so the page starts with the cards. */}
+      <HeaderPortal>
+        <div className="relative flex items-center gap-2">
+          <button onClick={loadData} title="Refresh" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 text-sm font-medium rounded-lg transition-colors">
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
           </button>
           <button
             onClick={() => setExportOpen(o => !o)}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
+            title="Export the overview report"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
             <Download size={16} /> Export
             <ChevronDown size={14} className={`transition-transform ${exportOpen ? 'rotate-180' : ''}`} />
           </button>
@@ -255,24 +248,9 @@ export default function Reports() {
             </>
           )}
         </div>
-      </div>
+      </HeaderPortal>
 
       {error && <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
-
-      {/* Report Type Selector */}
-      <div className="flex gap-2 flex-wrap">
-        {reportTypes.map(rt => (
-          <button
-            key={rt.id}
-            onClick={() => setReportType(rt.id)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-              reportType === rt.id ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
-            }`}
-          >
-            {rt.label}
-          </button>
-        ))}
-      </div>
 
       {/* Summary Cards — click to open the page that data lives on */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
